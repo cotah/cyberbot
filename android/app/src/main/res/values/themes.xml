@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Fullscreen, black, no action bar. The visual UI is driven entirely by
+        Jetpack Compose; this theme only controls the window chrome so the
+        holographic effect sits on absolute black.
+    -->
+    <style name="Theme.CyberBot" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/cyber_black</item>
+        <item name="android:statusBarColor">@color/cyber_black</item>
+        <item name="android:navigationBarColor">@color/cyber_black</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+</resources>

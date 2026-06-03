@@ -1,0 +1,153 @@
+package com.cyberbot.ai.ui
+
+import android.Manifest
+import android.content.Context
+import android.os.Bundle
+import android.util.Base64
+import android.util.Log
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
+import com.cyberbot.ai.audio.AudioCaptureManager
+import com.cyberbot.ai.audio.AudioPlaybackManager
+import com.cyberbot.ai.hologram.HologramRenderer
+import com.cyberbot.ai.kiosk.KioskManager
+import com.cyberbot.ai.network.BackendClient
+import com.cyberbot.ai.network.models.CyberbotResponse
+import com.cyberbot.ai.network.models.CyberbotState
+import com.cyberbot.ai.service.CyberbotService
+import com.cyberbot.ai.ui.theme.CyberBotTheme
+import com.cyberbot.ai.util.Constants
+import java.util.UUID
+
+/**
+ * Single fullscreen activity. Wires together state, networking, audio capture
+ * and playback, and renders the holographic display.
+ *
+ * Flow: STANDBY -> LISTENING (capture) -> THINKING (send) -> SPEAKING (play) ->
+ * back to LISTENING when playback completes.
+ */
+class MainActivity : ComponentActivity() {
+
+    private lateinit var service: CyberbotService
+    private lateinit var kioskManager: KioskManager
+    private lateinit var audioCapture: AudioCaptureManager
+    private lateinit var audioPlayback: AudioPlaybackManager
+    private lateinit var backendClient: BackendClient
+    private lateinit var sessionId: String
+
+    private val permissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+            Log.i(TAG, "Permission results: $result")
+            if (result[Manifest.permission.RECORD_AUDIO] == true) {
+                onPermissionsReady()
+            } else {
+                Log.e(TAG, "RECORD_AUDIO denied; cannot operate")
+                service.setError()
+            }
+        }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        service = CyberbotService()
+        kioskManager = KioskManager(this)
+        audioCapture = AudioCaptureManager(this)
+        audioPlayback = AudioPlaybackManager(this)
+        sessionId = getOrCreateSessionId()
+
+        backendClient = BackendClient(
+            onStateUpdate = { state -> runOnUiThread { service.setState(state) } },
+            onResponse = { response -> runOnUiThread { handleResponse(response) } },
+            onError = { error ->
+                Log.e(TAG, "Backend error: $error")
+                runOnUiThread { service.setError() }
+            },
+        )
+
+        setContent {
+            CyberBotTheme {
+                val state by service.state.collectAsState()
+                HologramRenderer(state = state, modifier = Modifier.fillMaxSize())
+            }
+        }
+
+        requestPermissions()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        kioskManager.enableKioskMode(this)
+    }
+
+    private fun requestPermissions() {
+        permissionLauncher.launch(
+            arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA),
+        )
+    }
+
+    private fun onPermissionsReady() {
+        backendClient.connect(sessionId)
+        service.setStandby()
+        startListeningCycle()
+    }
+
+    private fun startListeningCycle() {
+        service.startListening()
+        audioCapture.startCapture { audio ->
+            runOnUiThread { service.setThinking() }
+            backendClient.sendAudio(audio)
+        }
+    }
+
+    private fun handleResponse(response: CyberbotResponse) {
+        if (response.state == CyberbotState.ERROR) {
+            service.setError()
+            return
+        }
+        service.setSpeaking()
+
+        val onComplete: () -> Unit = { runOnUiThread { startListeningCycle() } }
+        val url = response.tts_url
+
+        when {
+            url != null && url.startsWith("data:") -> {
+                val base64 = url.substringAfter("base64,", "")
+                if (base64.isNotEmpty()) {
+                    val bytes = Base64.decode(base64, Base64.DEFAULT)
+                    audioPlayback.playFromBytes(bytes, onComplete)
+                } else {
+                    onComplete()
+                }
+            }
+            url != null -> audioPlayback.playFromUrl(url, onComplete)
+            else -> onComplete()
+        }
+    }
+
+    private fun getOrCreateSessionId(): String {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        var id = prefs.getString(Constants.SESSION_ID_KEY, null)
+        if (id == null) {
+            id = UUID.randomUUID().toString()
+            prefs.edit().putString(Constants.SESSION_ID_KEY, id).apply()
+        }
+        return id
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        audioCapture.stopCapture()
+        audioPlayback.stop()
+        backendClient.disconnect()
+    }
+
+    companion object {
+        private const val TAG = "MainActivity"
+        private const val PREFS_NAME = "cyberbot"
+    }
+}
