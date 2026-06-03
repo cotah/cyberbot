@@ -4,12 +4,13 @@
 tool use: if the model decides to call a tool, the tool is executed via the
 registry and the result is fed back to Claude until it produces a final text
 reply. Conversation history is loaded from memory before processing. The
-returned :class:`CyberbotResponse` carries the assistant state derived from the
-turn (informative -> SPEAKING, executing a tool -> EXECUTING, error -> ERROR).
+final returned :class:`CyberbotResponse` state is SPEAKING for a successful
+turn (or ERROR on failure); EXECUTING is emitted only as an intermediate state
+via the optional ``on_state`` callback while a tool is running.
 """
 
 import json
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from loguru import logger
 
@@ -56,6 +57,7 @@ async def process_message(
     session_id: str,
     user_message: str,
     tools: Optional[list[dict[str, Any]]] = None,
+    on_state: Optional[Callable[[CyberbotState], Awaitable[None]]] = None,
 ) -> CyberbotResponse:
     """Process a single user message and return a CyberbotResponse.
 
@@ -64,6 +66,9 @@ async def process_message(
         user_message: The user's text for this turn.
         tools: Anthropic tool definitions to expose to the model. Defaults to
             no tools.
+        on_state: Optional async callback invoked with intermediate states
+            (currently EXECUTING, emitted while a tool is running) so callers
+            can stream progress. The final returned state is always SPEAKING.
 
     Returns:
         A fully populated :class:`CyberbotResponse`. Never raises; failures are
@@ -109,6 +114,9 @@ async def process_message(
         from app.tools import registry
 
         while response.stop_reason == "tool_use":
+            # Surface the intermediate EXECUTING state while the tool runs.
+            if on_state is not None:
+                await on_state(CyberbotState.EXECUTING)
             messages.append({"role": "assistant", "content": response.content})
             tool_result_blocks: list[dict[str, Any]] = []
             for block in response.content:
@@ -133,12 +141,10 @@ async def process_message(
         ).strip()
 
         language = _detect_language(reply or user_message)
-        if tool_used:
-            state = CyberbotState.EXECUTING
-            emotion = "executing"
-        else:
-            state = CyberbotState.SPEAKING
-            emotion = "informative"
+        # The final reply is always spoken. EXECUTING is only an intermediate
+        # state, emitted via on_state while a tool runs (see loop above).
+        state = CyberbotState.SPEAKING
+        emotion = "informative"
 
         logger.info(
             "Claude turn complete (state={}, tool={}, lang={})",

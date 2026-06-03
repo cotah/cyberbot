@@ -41,3 +41,8 @@ Thumbs.db
 
 # --- Logs / local artifacts ---
 *.log
+
+# --- Test audio artifacts ---
+scripts/test_output.mp3
+scripts/*.mp3
+scripts/*.wav

@@ -66,10 +66,16 @@ async def conversation_ws(websocket: WebSocket, session_id: str) -> None:
 
                 # Thinking phase.
                 await websocket.send_json({"state": CyberbotState.THINKING.value})
+
+                # Stream intermediate states (e.g. EXECUTING while a tool runs).
+                async def emit_state(state: CyberbotState) -> None:
+                    await websocket.send_json({"state": state.value})
+
                 response: CyberbotResponse = await claude_client.process_message(
                     session_id=session_id,
                     user_message=user_text,
                     tools=registry.get_tools(),
+                    on_state=emit_state,
                 )
 
                 # Synthesize speech for the reply (best-effort).

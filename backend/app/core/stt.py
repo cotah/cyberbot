@@ -1,15 +1,17 @@
-"""Speech-to-text using Deepgram.
+"""Speech-to-text using Deepgram's prerecorded REST API.
 
-Supported languages: English (``en``), Portuguese (``pt``) and Spanish
-(``es``). The Deepgram SDK is imported lazily so a missing dependency does not
-block application startup.
+We call the stable HTTP endpoint directly with httpx instead of the Deepgram
+SDK: the SDK's public API changes substantially between major versions, while
+the REST contract is stable. Supported languages: English (``en``),
+Portuguese (``pt``) and Spanish (``es``).
 """
 
-import asyncio
-
+import httpx
 from loguru import logger
 
 from app.config import settings
+
+DEEPGRAM_URL = "https://api.deepgram.com/v1/listen"
 
 # Map our short language codes to Deepgram language codes.
 _LANGUAGE_MAP: dict[str, str] = {
@@ -28,7 +30,8 @@ async def transcribe_audio(audio_bytes: bytes, language: str = "en") -> str:
     """Transcribe raw audio bytes into text.
 
     Args:
-        audio_bytes: The raw audio payload (e.g. WAV/MP3/Opus bytes).
+        audio_bytes: The raw audio payload (WAV/MP3/Opus/etc.). Deepgram
+            auto-detects the container.
         language: One of ``en``, ``pt`` or ``es``.
 
     Returns:
@@ -40,24 +43,30 @@ async def transcribe_audio(audio_bytes: bytes, language: str = "en") -> str:
     if not settings.DEEPGRAM_API_KEY:
         raise RuntimeError("DEEPGRAM_API_KEY is not configured")
 
+    params = {
+        "model": "nova-2",
+        "language": _deepgram_language(language),
+        "smart_format": "true",
+    }
+    headers = {
+        "Authorization": f"Token {settings.DEEPGRAM_API_KEY}",
+        "Content-Type": "application/octet-stream",
+    }
+
     try:
-        from deepgram import DeepgramClient, PrerecordedOptions
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                DEEPGRAM_URL,
+                params=params,
+                headers=headers,
+                content=audio_bytes,
+            )
+            response.raise_for_status()
+            data = response.json()
 
-        client = DeepgramClient(settings.DEEPGRAM_API_KEY)
-        options = PrerecordedOptions(
-            model="nova-2",
-            language=_deepgram_language(language),
-            smart_format=True,
-        )
-        payload = {"buffer": audio_bytes}
-
-        def _op() -> str:
-            response = client.listen.rest.v("1").transcribe_file(payload, options)
-            return (
-                response.results.channels[0].alternatives[0].transcript or ""
-            ).strip()
-
-        transcript = await asyncio.to_thread(_op)
+        transcript = (
+            data["results"]["channels"][0]["alternatives"][0]["transcript"] or ""
+        ).strip()
         logger.info("Transcribed {} chars (lang={})", len(transcript), language)
         return transcript
     except Exception as exc:  # noqa: BLE001
