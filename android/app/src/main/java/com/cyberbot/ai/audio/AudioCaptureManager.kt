@@ -14,10 +14,13 @@ import kotlin.concurrent.thread
 import kotlin.math.abs
 
 /**
- * Captures raw PCM audio from the microphone (16 kHz, mono, 16-bit) and
- * automatically stops once the user goes silent (amplitude below
- * [Constants.SILENCE_THRESHOLD] for [Constants.SILENCE_DURATION_MS]). The
- * captured utterance is delivered via the `onAudioReady` callback.
+ * Captures raw PCM audio from the microphone (16 kHz, mono, 16-bit).
+ *
+ * Only chunks whose AVERAGE amplitude exceeds [Constants.SILENCE_THRESHOLD] are
+ * accumulated, so leading/background silence is never sent to the backend. The
+ * utterance is delivered via `onAudioReady` only after at least
+ * [MIN_SPEECH_MS] of real speech has been captured AND the user has gone silent
+ * for [Constants.SILENCE_DURATION_MS].
  */
 class AudioCaptureManager(private val context: Context) {
 
@@ -70,30 +73,46 @@ class AudioCaptureManager(private val context: Context) {
             val output = ByteArrayOutputStream()
             var lastVoiceTime = System.currentTimeMillis()
             var hasSpoken = false
+            var voicedDurationMs = 0L
 
             while (isCapturing) {
                 val read = record.read(buffer, 0, buffer.size)
                 if (read <= 0) continue
 
-                var maxAmplitude = 0
+                // Average amplitude of this chunk.
+                var sum = 0L
                 for (i in 0 until read) {
-                    val amp = abs(buffer[i].toInt())
-                    if (amp > maxAmplitude) maxAmplitude = amp
-                    // Write little-endian 16-bit PCM.
-                    val sample = buffer[i].toInt()
-                    output.write(sample and 0xFF)
-                    output.write((sample shr 8) and 0xFF)
+                    sum += abs(buffer[i].toInt())
                 }
-
+                val avgAmplitude = (sum / read).toInt()
+                val chunkDurationMs = read.toLong() * 1000L / Constants.SAMPLE_RATE
                 val now = System.currentTimeMillis()
-                if (maxAmplitude >= Constants.SILENCE_THRESHOLD) {
+
+                if (avgAmplitude > Constants.SILENCE_THRESHOLD) {
+                    // Voiced chunk: accumulate it.
+                    Log.d(TAG, "Audio chunk amplitude: $avgAmplitude — sending")
+                    for (i in 0 until read) {
+                        val sample = buffer[i].toInt()
+                        output.write(sample and 0xFF)
+                        output.write((sample shr 8) and 0xFF)
+                    }
                     lastVoiceTime = now
                     hasSpoken = true
-                } else if (hasSpoken && now - lastVoiceTime >= Constants.SILENCE_DURATION_MS) {
-                    val audio = output.toByteArray()
-                    Log.i(TAG, "Silence detected; delivering ${audio.size} bytes")
-                    onAudioReady(audio)
-                    break
+                    voicedDurationMs += chunkDurationMs
+                } else {
+                    // Silence chunk: skip (do not accumulate).
+                    Log.d(TAG, "Audio chunk amplitude: $avgAmplitude — skipping")
+                    val enoughSpeech = voicedDurationMs >= MIN_SPEECH_MS
+                    val silentLongEnough = now - lastVoiceTime >= Constants.SILENCE_DURATION_MS
+                    if (hasSpoken && enoughSpeech && silentLongEnough) {
+                        val audio = output.toByteArray()
+                        Log.i(
+                            TAG,
+                            "End of speech: ${voicedDurationMs}ms voiced; delivering ${audio.size} bytes",
+                        )
+                        onAudioReady(audio)
+                        break
+                    }
                 }
             }
             stopInternal()
@@ -120,5 +139,8 @@ class AudioCaptureManager(private val context: Context) {
 
     companion object {
         private const val TAG = "AudioCapture"
+
+        // Minimum amount of real (voiced) audio required before delivering.
+        private const val MIN_SPEECH_MS = 1000L
     }
 }
