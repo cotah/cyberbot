@@ -106,8 +106,11 @@ async def conversation_ws(websocket: WebSocket, session_id: str) -> None:
                         )
 
                     try:
+                        # Strip markdown so the voice speaks plain prose; the
+                        # original reply stays intact for on-screen display.
+                        speech_text = claude_client.clean_for_speech(response.reply)
                         provider = await tts.synthesize_speech_streaming(
-                            response.reply,
+                            speech_text,
                             language=response.language,
                             chunk_callback=_send_chunk,
                         )

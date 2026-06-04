@@ -10,6 +10,7 @@ via the optional ``on_state`` callback while a tool is running.
 """
 
 import json
+import re
 from typing import Any, Awaitable, Callable, Optional
 
 from loguru import logger
@@ -37,6 +38,34 @@ def _detect_language(text: str) -> str:
     from app.core.tts import detect_language
 
     return detect_language(text)
+
+
+def clean_for_speech(text: str) -> str:
+    """Strip markdown so the TTS engine speaks plain prose, not symbols.
+
+    Removes bold/italic markers, headers, links (keeping the label), code
+    blocks/inline code, stray double slashes, bullet markers and collapses
+    excess blank lines. Intended for the spoken reply only -- the original
+    text is kept intact for on-screen display.
+    """
+    # Remove bold and italic markers.
+    text = re.sub(r"\*+([^*]+)\*+", r"\1", text)
+    # Remove headers.
+    text = re.sub(r"^#+\s+", "", text, flags=re.MULTILINE)
+    # Remove links, keeping the visible label.
+    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+    # Remove fenced code blocks.
+    text = re.sub(r"```[^`]*```", "", text, flags=re.DOTALL)
+    # Remove inline code.
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    # Remove duplicated slashes.
+    text = re.sub(r"/{2,}", "", text)
+    # Remove bullet markers.
+    text = re.sub(r"^\s*[-*•]\s+", "", text, flags=re.MULTILINE)
+    # Collapse multiple blank lines.
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    # Trim surrounding whitespace.
+    return text.strip()
 
 
 # Phrases that suggest the user is stating a durable fact about themselves.

@@ -201,30 +201,30 @@ async def _stream_elevenlabs(text: str, chunk_callback: "ChunkCallback") -> None
 
 
 async def _stream_openai(text: str, chunk_callback: "ChunkCallback") -> None:
-    """Generate full 24 kHz mono PCM with OpenAI, then emit it in chunks."""
+    """Stream raw 24 kHz mono PCM from OpenAI TTS in real time.
+
+    Uses the async streaming response so each PCM chunk is forwarded as soon
+    as OpenAI produces it, instead of waiting for the full synthesis.
+    """
     if not settings.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured")
 
-    from openai import OpenAI
+    from openai import AsyncOpenAI
 
-    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
-    def _op() -> bytes:
-        response = client.audio.speech.create(
-            model="tts-1",
-            voice="alloy",
-            input=text,
-            response_format="pcm",  # 24 kHz, mono, 16-bit little-endian
-        )
-        return response.content
-
-    pcm = await asyncio.to_thread(_op)
     index = 0
-    for start in range(0, len(pcm), PCM_CHUNK_BYTES):
-        chunk = pcm[start : start + PCM_CHUNK_BYTES]
-        await chunk_callback(base64.b64encode(chunk).decode("utf-8"), index)
-        index += 1
-    logger.info("OpenAI streamed {} PCM chunks ({} bytes)", index, len(pcm))
+    async with client.audio.speech.with_streaming_response.create(
+        model="tts-1",
+        voice="alloy",
+        input=text,
+        response_format="pcm",  # 24 kHz, mono, 16-bit little-endian
+    ) as response:
+        async for chunk in response.iter_bytes(PCM_CHUNK_BYTES):
+            if chunk:
+                await chunk_callback(base64.b64encode(chunk).decode("utf-8"), index)
+                index += 1
+    logger.info("OpenAI streamed {} PCM chunks (real-time)", index)
 
 
 async def synthesize_speech_streaming(
