@@ -17,6 +17,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import com.cyberbot.ai.audio.AudioCaptureManager
 import com.cyberbot.ai.audio.AudioPlaybackManager
+import com.cyberbot.ai.audio.WakeWordDetector
 import com.cyberbot.ai.hologram.HologramRenderer
 import com.cyberbot.ai.kiosk.KioskManager
 import com.cyberbot.ai.network.BackendClient
@@ -40,6 +41,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var kioskManager: KioskManager
     private lateinit var audioCapture: AudioCaptureManager
     private lateinit var audioPlayback: AudioPlaybackManager
+    private lateinit var wakeWordDetector: WakeWordDetector
     private lateinit var backendClient: BackendClient
     private lateinit var sessionId: String
 
@@ -61,6 +63,9 @@ class MainActivity : ComponentActivity() {
         kioskManager = KioskManager(this)
         audioCapture = AudioCaptureManager(this)
         audioPlayback = AudioPlaybackManager(this)
+        wakeWordDetector = WakeWordDetector(applicationContext) {
+            runOnUiThread { onWakeWord() }
+        }
         sessionId = getOrCreateSessionId()
 
         backendClient = BackendClient(
@@ -110,7 +115,20 @@ class MainActivity : ComponentActivity() {
 
     private fun onPermissionsReady() {
         backendClient.connect(sessionId)
+        // Idle in STANDBY, listening for the "hey cyberbot" wake word.
+        returnToStandby()
+    }
+
+    /** Go idle: STANDBY state + wake-word listening. */
+    private fun returnToStandby() {
         service.setStandby()
+        wakeWordDetector.start()
+    }
+
+    /** Wake word heard: stop wake-word mic and start capturing the request. */
+    private fun onWakeWord() {
+        Log.i(TAG, "Wake word detected; switching to active listening")
+        wakeWordDetector.stop() // release the mic before AudioCaptureManager opens it
         startListeningCycle()
     }
 
@@ -129,7 +147,8 @@ class MainActivity : ComponentActivity() {
         }
         service.setSpeaking()
 
-        val onComplete: () -> Unit = { runOnUiThread { startListeningCycle() } }
+        // After speaking, go back to idle and listen for the wake word again.
+        val onComplete: () -> Unit = { runOnUiThread { returnToStandby() } }
         val url = response.tts_url
 
         when {
@@ -161,6 +180,7 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         audioCapture.stopCapture()
         audioPlayback.stop()
+        wakeWordDetector.shutdown()
         backendClient.disconnect()
     }
 

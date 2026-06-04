@@ -164,7 +164,7 @@ class AudioCaptureManager(private val context: Context) {
         private const val TAG = "AudioCapture"
 
         // Minimum amount of real (voiced) audio required before delivering.
-        private const val MIN_SPEECH_MS = 1000L
+        private const val MIN_SPEECH_MS = 500L
 
         // Audio sources tried in order until one initializes successfully.
         private val AUDIO_SOURCES = listOf(

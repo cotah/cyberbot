@@ -7,8 +7,8 @@ object Constants {
     const val SAMPLE_RATE = 16000
     val CHANNEL_CONFIG = android.media.AudioFormat.CHANNEL_IN_MONO
     val AUDIO_FORMAT = android.media.AudioFormat.ENCODING_PCM_16BIT
-    const val SILENCE_THRESHOLD = 1000
-    const val SILENCE_DURATION_MS = 2000L
+    const val SILENCE_THRESHOLD = 50
+    const val SILENCE_DURATION_MS = 1500L
 
     const val SESSION_ID_KEY = "cyberbot_session_id"
 }
