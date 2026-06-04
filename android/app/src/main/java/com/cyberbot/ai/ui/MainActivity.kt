@@ -55,6 +55,9 @@ class MainActivity : ComponentActivity() {
 
     @Volatile private var previewView: PreviewView? = null
 
+    // Delays for releasing the microphone between consumers (wake word vs capture).
+    private val micHandler = Handler(Looper.getMainLooper())
+
     // Continuous-conversation inactivity timer.
     private val conversationHandler = Handler(Looper.getMainLooper())
     @Volatile private var conversationDeadline = 0L
@@ -178,10 +181,17 @@ class MainActivity : ComponentActivity() {
         Log.i(TAG, "Camera started; capturing a frame every ${FRAME_INTERVAL_MS}ms")
     }
 
-    /** Go idle: STANDBY state + wake-word listening. */
+    /**
+     * Go idle: stop everything, wait for the mic to be released, then restart
+     * the wake-word detector and show STANDBY.
+     */
     private fun returnToStandby() {
-        service.setStandby()
-        wakeWordDetector.start()
+        audioCapture.stopCapture()
+        cancelConversationTimer()
+        micHandler.postDelayed({
+            wakeWordDetector.start()
+            service.setStandby()
+        }, MIC_RELEASE_DELAY_MS)
     }
 
     /** Wake word heard: stop wake-word mic and start capturing the request. */
@@ -206,10 +216,18 @@ class MainActivity : ComponentActivity() {
     /**
      * Continuous conversation: keep listening for the next question without a
      * wake word, and arm a 60s inactivity timer that falls back to STANDBY.
+     *
+     * Stops every mic consumer first and waits [MIC_RELEASE_DELAY_MS] so the
+     * microphone is fully released before opening a new capture (avoids the
+     * AudioRecord contention that previously broke the second turn).
      */
     private fun startContinuousConversation() {
-        resetConversationTimer()
-        startListeningCycle()
+        wakeWordDetector.stop()
+        audioCapture.stopCapture()
+        micHandler.postDelayed({
+            startListeningCycle()
+            resetConversationTimer()
+        }, MIC_RELEASE_DELAY_MS)
     }
 
     private fun resetConversationTimer() {
@@ -225,14 +243,15 @@ class MainActivity : ComponentActivity() {
 
     /** Inactivity timed out: stop listening and require the wake word again. */
     private fun endConversation() {
-        cancelConversationTimer()
-        audioCapture.stopCapture()
         returnToStandby()
     }
 
     private fun handleResponse(response: CyberbotResponse) {
         if (response.state == CyberbotState.ERROR) {
             service.setError()
+            // Auto-recover: after 3s, drop back to STANDBY and re-arm wake word
+            // instead of leaving a permanent red X.
+            micHandler.postDelayed({ returnToStandby() }, ERROR_RECOVERY_DELAY_MS)
             return
         }
         service.setSpeaking()
@@ -268,6 +287,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        micHandler.removeCallbacksAndMessages(null)
         conversationHandler.removeCallbacks(conversationTick)
         frameHandler.removeCallbacks(frameRunnable)
         cameraManager.release()
@@ -282,5 +302,7 @@ class MainActivity : ComponentActivity() {
         private const val PREFS_NAME = "cyberbot"
         private const val FRAME_INTERVAL_MS = 30000L
         private const val CONVERSATION_TICK_MS = 10000L
+        private const val MIC_RELEASE_DELAY_MS = 500L
+        private const val ERROR_RECOVERY_DELAY_MS = 3000L
     }
 }
