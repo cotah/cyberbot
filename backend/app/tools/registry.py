@@ -10,14 +10,23 @@ from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
+from app.tools.perplexity_tool import SEARCH_WEB_TOOL, search_web
 from app.tools.weather_tool import WEATHER_TOOL, get_weather
 
+
+async def _run_search_web(tool_input: dict[str, Any]) -> dict[str, Any]:
+    """Wrap the string result of search_web in a dict for the tool contract."""
+    summary = await search_web(**tool_input)
+    return {"summary": summary}
+
+
 # All tool definitions exposed to the model (Anthropic format).
-_TOOL_DEFINITIONS: list[dict[str, Any]] = [WEATHER_TOOL]
+_TOOL_DEFINITIONS: list[dict[str, Any]] = [WEATHER_TOOL, SEARCH_WEB_TOOL]
 
 # Map of tool name -> async executor.
 _EXECUTORS: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
     "get_weather": lambda tool_input: get_weather(**tool_input),
+    "search_web": _run_search_web,
 }
 
 
