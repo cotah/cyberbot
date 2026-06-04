@@ -50,16 +50,9 @@ class AudioCaptureManager(private val context: Context) {
         )
         val bufferSize = if (minBuffer > 0) minBuffer else Constants.SAMPLE_RATE * 2
 
-        val record = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            Constants.SAMPLE_RATE,
-            Constants.CHANNEL_CONFIG,
-            Constants.AUDIO_FORMAT,
-            bufferSize,
-        )
-        if (record.state != AudioRecord.STATE_INITIALIZED) {
-            Log.e(TAG, "AudioRecord failed to initialize")
-            record.release()
+        val record = createAudioRecord(bufferSize)
+        if (record == null) {
+            Log.e(TAG, "No working AudioSource found; cannot start capture")
             return
         }
 
@@ -119,6 +112,36 @@ class AudioCaptureManager(private val context: Context) {
         }
     }
 
+    /**
+     * Try each audio source in [AUDIO_SOURCES] order and return the first
+     * [AudioRecord] that reaches [AudioRecord.STATE_INITIALIZED]. Some devices
+     * (e.g. the KT-HC060 / YF-088D) return silence on MIC but work on
+     * VOICE_COMMUNICATION, hence the fallback chain.
+     */
+    @SuppressLint("MissingPermission") // Permission is verified by the caller.
+    private fun createAudioRecord(bufferSize: Int): AudioRecord? {
+        for ((source, name) in AUDIO_SOURCES) {
+            try {
+                val candidate = AudioRecord(
+                    source,
+                    Constants.SAMPLE_RATE,
+                    Constants.CHANNEL_CONFIG,
+                    Constants.AUDIO_FORMAT,
+                    bufferSize,
+                )
+                if (candidate.state == AudioRecord.STATE_INITIALIZED) {
+                    Log.i(TAG, "AudioRecord initialized with source: $name")
+                    return candidate
+                }
+                Log.w(TAG, "AudioSource $name not initialized; trying next")
+                candidate.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "AudioSource $name failed: ${e.message}")
+            }
+        }
+        return null
+    }
+
     fun stopCapture() {
         Log.i(TAG, "stopCapture requested")
         isCapturing = false
@@ -142,5 +165,13 @@ class AudioCaptureManager(private val context: Context) {
 
         // Minimum amount of real (voiced) audio required before delivering.
         private const val MIN_SPEECH_MS = 1000L
+
+        // Audio sources tried in order until one initializes successfully.
+        private val AUDIO_SOURCES = listOf(
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION to "VOICE_COMMUNICATION",
+            MediaRecorder.AudioSource.MIC to "MIC",
+            MediaRecorder.AudioSource.CAMCORDER to "CAMCORDER",
+            MediaRecorder.AudioSource.DEFAULT to "DEFAULT",
+        )
     }
 }

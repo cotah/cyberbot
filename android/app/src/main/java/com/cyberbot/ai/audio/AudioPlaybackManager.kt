@@ -3,6 +3,7 @@ package com.cyberbot.ai.audio
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.util.Base64
 import android.util.Log
 import java.io.File
 
@@ -16,6 +17,28 @@ class AudioPlaybackManager(private val context: Context) {
     private var mediaPlayer: MediaPlayer? = null
 
     fun playFromUrl(url: String, onComplete: () -> Unit) {
+        // The backend delivers TTS as a base64 "data:" URI, which MediaPlayer
+        // cannot stream directly. Decode it and play from bytes instead.
+        if (url.startsWith("data:")) {
+            Log.i(TAG, "Playback from data URI")
+            val base64 = url.substringAfter("base64,", "")
+            if (base64.isEmpty()) {
+                Log.e(TAG, "data URI has no base64 payload")
+                onComplete()
+                return
+            }
+            val bytes = try {
+                Base64.decode(base64, Base64.DEFAULT)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to decode data URI base64: ${e.message}")
+                onComplete()
+                return
+            }
+            playFromBytes(bytes, onComplete)
+            return
+        }
+
+        // Regular http(s) URL.
         Log.i(TAG, "Playback from URL")
         stop()
         val player = newPlayer(onComplete)
