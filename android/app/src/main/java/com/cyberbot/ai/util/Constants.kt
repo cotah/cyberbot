@@ -13,5 +13,8 @@ object Constants {
     // Continuous conversation window after a reply (no wake word needed)
     const val CONVERSATION_TIMEOUT_MS = 60000L
 
+    // Allow interrupting the assistant mid-speech by saying the wake word
+    const val ALLOW_INTERRUPT_DURING_SPEECH = true
+
     const val SESSION_ID_KEY = "cyberbot_session_id"
 }

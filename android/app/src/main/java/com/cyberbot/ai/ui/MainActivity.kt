@@ -194,11 +194,21 @@ class MainActivity : ComponentActivity() {
         }, MIC_RELEASE_DELAY_MS)
     }
 
-    /** Wake word heard: stop wake-word mic and start capturing the request. */
+    /**
+     * Wake word heard. If the assistant is currently speaking, this is a
+     * barge-in: stop the TTS and start listening immediately. Otherwise it is a
+     * normal activation from STANDBY.
+     */
     private fun onWakeWord() {
-        Log.i(TAG, "Wake word detected; switching to active listening")
-        wakeWordDetector.stop() // release the mic before AudioCaptureManager opens it
-        startListeningCycle()
+        val current = service.state.value
+        Log.i(TAG, "Wake word detected (state=$current)")
+        if (current == CyberbotState.SPEAKING) {
+            Log.i(TAG, "Barge-in: interrupting speech to listen")
+            audioPlayback.stop() // stop TTS now; onComplete is suppressed
+        }
+        // startContinuousConversation stops the wake word + any capture, waits
+        // for the mic, then begins a fresh listening cycle with the 60s timer.
+        startContinuousConversation()
     }
 
     private fun startListeningCycle() {
@@ -255,6 +265,13 @@ class MainActivity : ComponentActivity() {
             return
         }
         service.setSpeaking()
+
+        // Keep the wake word active during playback so the user can interrupt
+        // ("barge-in") by saying "cyberbot". The mic is free here (capture has
+        // already finished), so there is no AudioRecord contention with TTS.
+        if (Constants.ALLOW_INTERRUPT_DURING_SPEECH) {
+            wakeWordDetector.start()
+        }
 
         // After speaking, stay in continuous conversation for 60s (no wake word).
         val onComplete: () -> Unit = { runOnUiThread { startContinuousConversation() } }

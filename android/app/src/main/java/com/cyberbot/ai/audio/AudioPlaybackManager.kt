@@ -16,6 +16,10 @@ class AudioPlaybackManager(private val context: Context) {
 
     private var mediaPlayer: MediaPlayer? = null
 
+    // When stopped manually (e.g. barge-in), the onComplete callback is skipped
+    // so the caller does not double-trigger the next listening cycle.
+    @Volatile private var manuallyStopped = false
+
     fun playFromUrl(url: String, onComplete: () -> Unit) {
         // The backend delivers TTS as a base64 "data:" URI, which MediaPlayer
         // cannot stream directly. Decode it and play from bytes instead.
@@ -84,6 +88,7 @@ class AudioPlaybackManager(private val context: Context) {
     }
 
     fun stop() {
+        manuallyStopped = true
         mediaPlayer?.let { player ->
             try {
                 if (player.isPlaying) player.stop()
@@ -93,10 +98,13 @@ class AudioPlaybackManager(private val context: Context) {
             player.release()
         }
         mediaPlayer = null
+        Log.i(TAG, "Playback stopped manually")
     }
 
-    private fun newPlayer(onComplete: () -> Unit): MediaPlayer =
-        MediaPlayer().apply {
+    private fun newPlayer(onComplete: () -> Unit): MediaPlayer {
+        // A fresh playback is starting, so it was not manually stopped (yet).
+        manuallyStopped = false
+        return MediaPlayer().apply {
             setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_ASSISTANT)
@@ -108,15 +116,17 @@ class AudioPlaybackManager(private val context: Context) {
                 it.start()
             }
             setOnCompletionListener {
+                if (manuallyStopped) return@setOnCompletionListener
                 Log.i(TAG, "Playback complete")
                 onComplete()
             }
             setOnErrorListener { _, what, extra ->
                 Log.e(TAG, "Playback error: what=$what extra=$extra")
-                onComplete()
+                if (!manuallyStopped) onComplete()
                 true
             }
         }
+    }
 
     companion object {
         private const val TAG = "AudioPlayback"
