@@ -58,6 +58,9 @@ class MainActivity : ComponentActivity() {
     // Delays for releasing the microphone between consumers (wake word vs capture).
     private val micHandler = Handler(Looper.getMainLooper())
 
+    // When the current TTS playback started (for the barge-in grace period).
+    @Volatile private var speakingStartTime = 0L
+
     // Continuous-conversation inactivity timer.
     private val conversationHandler = Handler(Looper.getMainLooper())
     @Volatile private var conversationDeadline = 0L
@@ -203,6 +206,14 @@ class MainActivity : ComponentActivity() {
         val current = service.state.value
         Log.i(TAG, "Wake word detected (state=$current)")
         if (current == CyberbotState.SPEAKING) {
+            val elapsed = SystemClock.elapsedRealtime() - speakingStartTime
+            if (elapsed < SPEAKING_GRACE_MS) {
+                // Likely the assistant's own voice early in playback; ignore and
+                // re-arm so a real interruption after the grace period still works.
+                Log.i(TAG, "Wake word ignored: grace period (${elapsed}ms < ${SPEAKING_GRACE_MS}ms)")
+                wakeWordDetector.rearm()
+                return
+            }
             Log.i(TAG, "Barge-in: interrupting speech to listen")
             audioPlayback.stop() // stop TTS now; onComplete is suppressed
         }
@@ -270,6 +281,7 @@ class MainActivity : ComponentActivity() {
         // ("barge-in") by saying "cyberbot". The mic is free here (capture has
         // already finished), so there is no AudioRecord contention with TTS.
         if (Constants.ALLOW_INTERRUPT_DURING_SPEECH) {
+            speakingStartTime = SystemClock.elapsedRealtime()
             wakeWordDetector.start()
         }
 
@@ -321,5 +333,6 @@ class MainActivity : ComponentActivity() {
         private const val CONVERSATION_TICK_MS = 10000L
         private const val MIC_RELEASE_DELAY_MS = 500L
         private const val ERROR_RECOVERY_DELAY_MS = 3000L
+        private const val SPEAKING_GRACE_MS = 1500L
     }
 }

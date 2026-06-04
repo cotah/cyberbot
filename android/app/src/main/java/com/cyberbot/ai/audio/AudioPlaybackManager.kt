@@ -90,8 +90,18 @@ class AudioPlaybackManager(private val context: Context) {
     fun stop() {
         manuallyStopped = true
         mediaPlayer?.let { player ->
+            // pause() halts audio output instantly; stop()/release() then tear
+            // down without the audible tail that a bare stop() can leave.
             try {
-                if (player.isPlaying) player.stop()
+                if (player.isPlaying) {
+                    player.pause()
+                    player.seekTo(0)
+                }
+            } catch (e: IllegalStateException) {
+                Log.w(TAG, "pause/seek failed: ${e.message}")
+            }
+            try {
+                player.stop()
             } catch (e: IllegalStateException) {
                 Log.w(TAG, "stop failed: ${e.message}")
             }

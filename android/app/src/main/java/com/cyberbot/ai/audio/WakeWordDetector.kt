@@ -78,6 +78,14 @@ class WakeWordDetector(
         }
     }
 
+    /**
+     * Re-arm detection after an ignored trigger (e.g. during the speech grace
+     * period) without restarting the audio loop. Lets the detector fire again.
+     */
+    fun rearm() {
+        triggered = false
+    }
+
     /** Stop listening and release the microphone (model stays loaded). */
     fun stop() {
         // The capture loop checks this flag every chunk (~256 ms) and then
@@ -244,7 +252,7 @@ class WakeWordDetector(
     companion object {
         private const val TAG = "WakeWordDetector"
         private const val SAMPLE_RATE_F = 16000.0f
-        private const val CHUNK_SAMPLES = 4096
+        private const val CHUNK_SAMPLES = 1024
 
         // Any of these words (as a substring) triggers the wake action.
         private val WAKE_WORDS = listOf(
