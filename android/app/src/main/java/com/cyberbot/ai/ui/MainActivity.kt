@@ -125,6 +125,12 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread { service.setError() }
             },
         )
+        backendClient.onTtsChunk = { b64 ->
+            runOnUiThread { audioPlayback.addChunk(Base64.decode(b64, Base64.NO_WRAP)) }
+        }
+        backendClient.onTtsEnd = {
+            runOnUiThread { audioPlayback.signalEnd() }
+        }
 
         setContent {
             CyberBotTheme {
@@ -285,22 +291,10 @@ class MainActivity : ComponentActivity() {
             wakeWordDetector.start()
         }
 
-        // After speaking, stay in continuous conversation for 60s (no wake word).
-        val onComplete: () -> Unit = { runOnUiThread { startContinuousConversation() } }
-        val url = response.tts_url
-
-        when {
-            url != null && url.startsWith("data:") -> {
-                val base64 = url.substringAfter("base64,", "")
-                if (base64.isNotEmpty()) {
-                    val bytes = Base64.decode(base64, Base64.DEFAULT)
-                    audioPlayback.playFromBytes(bytes, onComplete)
-                } else {
-                    onComplete()
-                }
-            }
-            url != null -> audioPlayback.playFromUrl(url, onComplete)
-            else -> onComplete()
+        // Audio arrives as a stream of PCM chunks (onTtsChunk). Start streaming
+        // playback now; when it finishes, stay in continuous conversation.
+        audioPlayback.startStream {
+            runOnUiThread { startContinuousConversation() }
         }
     }
 

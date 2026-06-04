@@ -46,3 +46,4 @@ Thumbs.db
 scripts/test_output.mp3
 scripts/*.mp3
 scripts/*.wav
+scripts/*.pcm

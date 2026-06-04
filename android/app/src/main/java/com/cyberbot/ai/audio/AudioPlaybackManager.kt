@@ -1,90 +1,138 @@
 package com.cyberbot.ai.audio
 
 import android.content.Context
-import android.media.MediaPlayer
-import android.util.Base64
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
 import android.util.Log
-import java.io.File
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 /**
- * Simple MP3 playback via MediaPlayer with an instant stop (pause + stop).
- * Manual stops suppress the onComplete callback so the caller does not
- * double-trigger the next listening cycle (used by barge-in).
+ * Streams raw PCM (24 kHz mono 16-bit) chunks to an AudioTrack as they arrive
+ * over the network, for instant interruption.
+ *
+ * Flow: [startStream] (begins the playback thread) -> [addChunk] per received
+ * chunk -> [signalEnd] when the backend sent tts_end. [stop] silences and
+ * clears everything within one chunk.
  */
 class AudioPlaybackManager(private val context: Context) {
 
-    private var mediaPlayer: MediaPlayer? = null
-    private var manuallyStopped = false
+    private val queue = LinkedBlockingQueue<ByteArray>()
 
-    fun playFromBytes(audioBytes: ByteArray, onComplete: () -> Unit) {
+    @Volatile private var manuallyStopped = false
+    @Volatile private var endSignaled = false
+    @Volatile private var audioTrack: AudioTrack? = null
+    private var playbackThread: Thread? = null
+    private var onComplete: (() -> Unit)? = null
+
+    /** Begin a new streaming playback session. */
+    fun startStream(onComplete: () -> Unit) {
+        stop() // tear down any previous session
         manuallyStopped = false
-        mediaPlayer?.release()
-
-        val tempFile = File.createTempFile("tts", ".mp3", context.cacheDir)
-        tempFile.writeBytes(audioBytes)
-
-        mediaPlayer = MediaPlayer().apply {
-            setDataSource(tempFile.absolutePath)
-            setOnCompletionListener {
-                tempFile.delete()
-                if (!manuallyStopped) onComplete()
-            }
-            setOnErrorListener { _, _, _ ->
-                tempFile.delete()
-                if (!manuallyStopped) onComplete()
-                true
-            }
-            prepare()
-            start()
-        }
-        Log.i(TAG, "Playback started (${audioBytes.size} bytes)")
+        endSignaled = false
+        queue.clear()
+        this.onComplete = onComplete
+        playbackThread = thread(name = "TtsStream") { runPlayback() }
+        Log.i(TAG, "TTS stream started")
     }
 
-    fun playFromUrl(url: String, onComplete: () -> Unit) {
-        if (url.startsWith("data:")) {
-            val base64 = url.substringAfter("base64,", "")
-            val bytes = Base64.decode(base64, Base64.DEFAULT)
-            playFromBytes(bytes, onComplete)
-            return
-        }
+    /** Enqueue a raw PCM chunk for playback. */
+    fun addChunk(pcm: ByteArray) {
+        if (!manuallyStopped) queue.offer(pcm)
+    }
 
-        // Plain URL (not used by the backend, which sends data URIs).
-        manuallyStopped = false
-        mediaPlayer?.release()
-        mediaPlayer = MediaPlayer().apply {
-            setDataSource(url)
-            setOnCompletionListener { if (!manuallyStopped) onComplete() }
-            setOnErrorListener { _, _, _ ->
-                if (!manuallyStopped) onComplete()
-                true
-            }
-            setOnPreparedListener { start() }
-            prepareAsync()
-        }
+    /** Signal that no more chunks will arrive; playback finishes when drained. */
+    fun signalEnd() {
+        endSignaled = true
     }
 
     fun stop() {
         manuallyStopped = true
-        mediaPlayer?.let {
+        queue.clear()
+        audioTrack?.let { track ->
             try {
-                if (it.isPlaying) {
-                    it.pause()
-                    it.stop()
-                }
-                it.release()
-            } catch (e: Exception) {
-                Log.e(TAG, "Stop error", e)
+                track.pause()
+                track.flush()
+            } catch (e: IllegalStateException) {
+                Log.w(TAG, "pause/flush failed: ${e.message}")
             }
         }
-        mediaPlayer = null
-        Log.i(TAG, "Playback stopped manually")
+        releaseTrack()
     }
 
     fun release() {
         stop()
     }
 
+    private fun runPlayback() {
+        val minBuffer = AudioTrack.getMinBufferSize(
+            SAMPLE_RATE,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        val bufferSize = if (minBuffer > 0) maxOf(minBuffer, 8192) else 8192
+
+        val track = AudioTrack(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build(),
+            AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(SAMPLE_RATE)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .build(),
+            bufferSize,
+            AudioTrack.MODE_STREAM,
+            AudioManager.AUDIO_SESSION_ID_GENERATE,
+        )
+        audioTrack = track
+        track.play()
+
+        try {
+            while (!manuallyStopped) {
+                val chunk = queue.poll(50, TimeUnit.MILLISECONDS)
+                if (chunk != null) {
+                    track.write(chunk, 0, chunk.size)
+                } else if (endSignaled) {
+                    break // end signaled and nothing left to play
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Stream playback error: ${e.message}", e)
+        }
+
+        if (!manuallyStopped) {
+            try {
+                track.stop() // drain remaining buffered audio
+            } catch (e: IllegalStateException) {
+                Log.w(TAG, "track stop failed: ${e.message}")
+            }
+        }
+        releaseTrack()
+
+        if (!manuallyStopped) {
+            Log.i(TAG, "TTS stream complete")
+            onComplete?.invoke()
+        }
+    }
+
+    private fun releaseTrack() {
+        audioTrack?.let { track ->
+            try {
+                track.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "AudioTrack release failed: ${e.message}")
+            }
+        }
+        audioTrack = null
+    }
+
     companion object {
         private const val TAG = "AudioPlayback"
+        private const val SAMPLE_RATE = 24000
     }
 }

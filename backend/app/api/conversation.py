@@ -91,30 +91,30 @@ async def conversation_ws(websocket: WebSocket, session_id: str) -> None:
                     on_state=emit_state,
                 )
 
-                # Synthesize speech for the reply (best-effort).
-                if response.reply and response.state != CyberbotState.ERROR:
-                    try:
-                        audio = await tts.synthesize_speech(
-                            response.reply, language=response.language
-                        )
-                        response.tts_url = (
-                            "data:audio/mp3;base64,"
-                            + base64.b64encode(audio).decode("utf-8")
-                        )
-                        logger.info(
-                            "TTS attached to response ({} audio bytes)", len(audio)
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        # Do not fail the turn; surface clearly that tts_url is null.
-                        logger.error(
-                            "TTS failed; response tts_url will be null: {}", exc
-                        )
-
                 # Note: the turn is persisted inside claude_client.process_message
                 # (RAG), so we do not save it again here to avoid duplicates.
 
-                # Final response (includes state SPEAKING/EXECUTING/ERROR).
+                # Send the final response first (no tts_url) so the client can
+                # set up streaming playback; the audio follows as PCM chunks.
                 await websocket.send_json(response.model_dump())
+
+                # Stream the speech as raw PCM chunks for instant interruption.
+                if response.reply and response.state != CyberbotState.ERROR:
+                    async def _send_chunk(b64: str, index: int) -> None:
+                        await websocket.send_json(
+                            {"type": "tts_chunk", "data": b64, "index": index}
+                        )
+
+                    try:
+                        provider = await tts.synthesize_speech_streaming(
+                            response.reply,
+                            language=response.language,
+                            chunk_callback=_send_chunk,
+                        )
+                        logger.info("TTS streamed via {}", provider)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("TTS streaming failed: {}", exc)
+                    await websocket.send_json({"type": "tts_end"})
 
             except Exception as exc:  # noqa: BLE001 - per-turn isolation
                 logger.error("Error processing turn: {}", exc)

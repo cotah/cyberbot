@@ -1,38 +1,37 @@
-"""Manual test: OpenAI text-to-speech.
+"""Manual test: streaming TTS (raw PCM chunks).
 
-Gets a fresh reply from Claude, synthesizes it via tts.py, saves the MP3 and
-prints its size. Run from the backend directory:
-    uv run python scripts/test_tts.py
+Run from the backend directory: uv run python scripts/test_tts.py
 """
 
 import asyncio
+import base64
 import sys
 from pathlib import Path
 
 # Make the backend root importable when run as "python scripts/test_tts.py".
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.core import claude_client, tts
+from app.core import tts
 
 
 async def main() -> None:
-    print("Getting text from Claude ...")
-    response = await claude_client.process_message(
-        session_id="test_session",
-        user_message="Hello CyberBot, introduce yourself in one sentence.",
-        tools=[],
-    )
-    text = response.reply
-    print("Text to synthesize:", text)
+    text = "Hello operator, this is a streaming test of the CyberBot voice."
+    chunks: list[bytes] = []
 
-    print("Synthesizing via TTS ...")
-    audio_bytes = await tts.synthesize_speech(text, language=response.language)
+    async def on_chunk(b64: str, index: int) -> None:
+        chunks.append(base64.b64decode(b64))
 
-    output_path = Path(__file__).parent / "test_output.mp3"
-    output_path.write_bytes(audio_bytes)
+    print("Streaming TTS ...")
+    provider = await tts.synthesize_speech_streaming(text, "en", on_chunk)
+
+    total = sum(len(c) for c in chunks)
+    out = Path(__file__).parent / "test_output.pcm"
+    out.write_bytes(b"".join(chunks))
     print("=" * 50)
-    print(f"Saved: {output_path}")
-    print(f"Size:  {len(audio_bytes)} bytes")
+    print(f"Provider:    {provider}")
+    print(f"Chunks:      {len(chunks)}")
+    print(f"Total PCM:   {total} bytes (24kHz mono 16-bit)")
+    print(f"Saved:       {out}")
     print("=" * 50)
 
 

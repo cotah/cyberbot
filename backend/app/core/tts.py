@@ -12,7 +12,8 @@ free best-effort guess between English, Portuguese and Spanish.
 """
 
 import asyncio
-from typing import Awaitable, Callable
+import base64
+from typing import Awaitable, Callable, Optional
 
 from loguru import logger
 
@@ -155,3 +156,100 @@ async def synthesize_speech(text: str, language: str = "en") -> bytes:
     detail = "; ".join(errors)
     logger.error("TTS: all providers failed -> {}", detail)
     raise RuntimeError(f"Speech synthesis failed (all providers): {detail}")
+
+
+# ---------------------------------------------------------------------------
+# Streaming synthesis (raw 24 kHz mono 16-bit PCM, base64 per chunk).
+#
+# We stream raw PCM (not MP3) so each chunk is independently usable by an
+# AudioTrack on the client without decoding -- MP3 frames cross chunk
+# boundaries and cannot be decoded per-chunk.
+# ---------------------------------------------------------------------------
+
+# callback(base64_chunk: str, index: int) -> awaitable
+ChunkCallback = Callable[[str, int], Awaitable[None]]
+
+PCM_CHUNK_BYTES = 4096
+
+
+async def _stream_elevenlabs(text: str, chunk_callback: "ChunkCallback") -> None:
+    """Stream raw PCM (pcm_24000) from ElevenLabs, base64 per chunk."""
+    import httpx
+
+    url = (
+        "https://api.elevenlabs.io/v1/text-to-speech/"
+        f"{settings.ELEVENLABS_VOICE_ID}/stream"
+    )
+    params = {"output_format": "pcm_24000"}
+    headers = {
+        "xi-api-key": settings.ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = {"text": text, "model_id": "eleven_monolingual_v1"}
+
+    index = 0
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        async with client.stream(
+            "POST", url, params=params, headers=headers, json=payload
+        ) as response:
+            response.raise_for_status()
+            async for chunk in response.aiter_bytes(PCM_CHUNK_BYTES):
+                if chunk:
+                    await chunk_callback(base64.b64encode(chunk).decode("utf-8"), index)
+                    index += 1
+    logger.info("ElevenLabs streamed {} PCM chunks", index)
+
+
+async def _stream_openai(text: str, chunk_callback: "ChunkCallback") -> None:
+    """Generate full 24 kHz mono PCM with OpenAI, then emit it in chunks."""
+    if not settings.OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    from openai import OpenAI
+
+    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+    def _op() -> bytes:
+        response = client.audio.speech.create(
+            model="tts-1",
+            voice="alloy",
+            input=text,
+            response_format="pcm",  # 24 kHz, mono, 16-bit little-endian
+        )
+        return response.content
+
+    pcm = await asyncio.to_thread(_op)
+    index = 0
+    for start in range(0, len(pcm), PCM_CHUNK_BYTES):
+        chunk = pcm[start : start + PCM_CHUNK_BYTES]
+        await chunk_callback(base64.b64encode(chunk).decode("utf-8"), index)
+        index += 1
+    logger.info("OpenAI streamed {} PCM chunks ({} bytes)", index, len(pcm))
+
+
+async def synthesize_speech_streaming(
+    text: str,
+    language: str = "en",
+    chunk_callback: Optional["ChunkCallback"] = None,
+) -> str:
+    """Stream speech as raw 24 kHz mono PCM, delivering base64 chunks.
+
+    Prefers ElevenLabs (true streaming) when configured, otherwise OpenAI
+    (full synth then chunked). Returns the provider name used.
+    """
+    if not text.strip():
+        raise RuntimeError("Cannot synthesize empty text")
+    if chunk_callback is None:
+        raise RuntimeError("chunk_callback is required for streaming synthesis")
+
+    if settings.ELEVENLABS_API_KEY and settings.ELEVENLABS_VOICE_ID:
+        try:
+            await _stream_elevenlabs(text, chunk_callback)
+            return "elevenlabs"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "ElevenLabs streaming failed; falling back to OpenAI: {}", exc
+            )
+
+    await _stream_openai(text, chunk_callback)
+    return "openai"

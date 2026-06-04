@@ -36,6 +36,10 @@ class BackendClient(
         .pingInterval(20, TimeUnit.SECONDS)
         .build()
 
+    // Streaming TTS callbacks (set by the caller).
+    var onTtsChunk: ((String) -> Unit)? = null
+    var onTtsEnd: (() -> Unit)? = null
+
     private val gson = Gson()
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
 
@@ -144,7 +148,11 @@ class BackendClient(
     private fun handleMessage(text: String) {
         try {
             val json = JsonParser.parseString(text).asJsonObject
+            val type = if (json.has("type")) json.get("type").asString else null
             when {
+                // Streaming TTS frames.
+                type == "tts_chunk" -> onTtsChunk?.invoke(json.get("data").asString)
+                type == "tts_end" -> onTtsEnd?.invoke()
                 // A full response always carries a "reply" field.
                 json.has("reply") -> {
                     val response = gson.fromJson(text, CyberbotResponse::class.java)
