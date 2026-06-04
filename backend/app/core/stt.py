@@ -27,11 +27,14 @@ def _deepgram_language(language: str) -> str:
 
 
 async def transcribe_audio(audio_bytes: bytes, language: str = "en") -> str:
-    """Transcribe raw audio bytes into text.
+    """Transcribe raw PCM audio bytes into text.
+
+    The Android client streams headerless raw PCM (16-bit signed little-endian,
+    16 kHz, mono), so we declare the encoding explicitly to Deepgram instead of
+    relying on container auto-detection (which fails with HTTP 400 for raw PCM).
 
     Args:
-        audio_bytes: The raw audio payload (WAV/MP3/Opus/etc.). Deepgram
-            auto-detects the container.
+        audio_bytes: Raw linear16 PCM audio (16-bit, 16 kHz, mono).
         language: One of ``en``, ``pt`` or ``es``.
 
     Returns:
@@ -47,10 +50,13 @@ async def transcribe_audio(audio_bytes: bytes, language: str = "en") -> str:
         "model": "nova-2",
         "language": _deepgram_language(language),
         "smart_format": "true",
+        "encoding": "linear16",
+        "sample_rate": "16000",
+        "channels": "1",
     }
     headers = {
         "Authorization": f"Token {settings.DEEPGRAM_API_KEY}",
-        "Content-Type": "application/octet-stream",
+        "Content-Type": "audio/raw",
     }
 
     try:
