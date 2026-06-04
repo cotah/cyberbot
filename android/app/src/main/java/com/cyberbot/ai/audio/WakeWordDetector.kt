@@ -101,7 +101,10 @@ class WakeWordDetector(
 
     @SuppressLint("MissingPermission") // RECORD_AUDIO is verified by the caller.
     private fun runRecognitionLoop(loadedModel: Model) {
-        val recognizer = Recognizer(loadedModel, SAMPLE_RATE_F)
+        // Grammar mode constrains the recognizer to a small set of words, which
+        // greatly improves wake-word reliability vs free-form recognition.
+        val grammar = """["cyberbot", "cyber bot", "computer", "robot", "hey", "[unk]"]"""
+        val recognizer = Recognizer(loadedModel, SAMPLE_RATE_F, grammar)
         val minBuffer = AudioRecord.getMinBufferSize(
             Constants.SAMPLE_RATE,
             Constants.CHANNEL_CONFIG,
@@ -143,7 +146,7 @@ class WakeWordDetector(
                 val isFinal = recognizer.acceptWaveForm(buffer, read)
                 val hypothesis =
                     if (isFinal) recognizer.result else recognizer.partialResult
-                checkHypothesis(hypothesis)
+                checkHypothesis(hypothesis, isFinal)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Wake word capture loop error", e)
@@ -164,7 +167,7 @@ class WakeWordDetector(
         }
     }
 
-    private fun checkHypothesis(hypothesis: String?) {
+    private fun checkHypothesis(hypothesis: String?, isFinal: Boolean) {
         if (hypothesis.isNullOrBlank()) return
         val text = try {
             val json = JSONObject(hypothesis)
@@ -174,7 +177,15 @@ class WakeWordDetector(
         }.lowercase()
 
         if (text.isBlank()) return
-        if (text.contains("cyberbot") || text.contains("cyber bot")) {
+
+        // Always log what Vosk heard, to help tune detection on-device.
+        if (isFinal) {
+            Log.d(TAG, "Vosk result: $text")
+        } else {
+            Log.d(TAG, "Vosk partial: $text")
+        }
+
+        if (WAKE_WORDS.any { text.contains(it) }) {
             if (!triggered) {
                 triggered = true
                 Log.i(TAG, "Wake word detected in: \"$text\"")
@@ -234,6 +245,11 @@ class WakeWordDetector(
         private const val TAG = "WakeWordDetector"
         private const val SAMPLE_RATE_F = 16000.0f
         private const val CHUNK_SAMPLES = 4096
+
+        // Any of these words (as a substring) triggers the wake action.
+        private val WAKE_WORDS = listOf(
+            "cyberbot", "cyber bot", "cyber", "computer", "robot", "hey",
+        )
         private const val MODEL_URL =
             "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
     }
