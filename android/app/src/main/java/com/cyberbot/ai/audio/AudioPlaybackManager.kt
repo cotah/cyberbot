@@ -5,6 +5,7 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.os.Process
 import android.util.Log
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -68,12 +69,18 @@ class AudioPlaybackManager(private val context: Context) {
     }
 
     private fun runPlayback() {
+        // Run at audio priority so the OS scheduler keeps this thread ahead of
+        // ordinary work -- avoids jitter/delay feeding the AudioTrack.
+        Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+
+        // Use the device's true minimum buffer for 24 kHz mono 16-bit PCM so
+        // the first chunk reaches the speaker with the least latency possible.
         val minBuffer = AudioTrack.getMinBufferSize(
             SAMPLE_RATE,
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
         )
-        val bufferSize = if (minBuffer > 0) maxOf(minBuffer, 8192) else 8192
+        val bufferSize = if (minBuffer > 0) minBuffer else 4096
 
         val track = AudioTrack(
             AudioAttributes.Builder()
@@ -90,6 +97,8 @@ class AudioPlaybackManager(private val context: Context) {
             AudioManager.AUDIO_SESSION_ID_GENERATE,
         )
         audioTrack = track
+        // Start the track BEFORE the chunk loop so it plays the first chunk the
+        // instant it is written -- no waiting to accumulate chunks.
         track.play()
 
         try {
