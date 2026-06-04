@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -53,6 +54,23 @@ class MainActivity : ComponentActivity() {
     private lateinit var sessionId: String
 
     @Volatile private var previewView: PreviewView? = null
+
+    // Continuous-conversation inactivity timer.
+    private val conversationHandler = Handler(Looper.getMainLooper())
+    @Volatile private var conversationDeadline = 0L
+    private val conversationTick = object : Runnable {
+        override fun run() {
+            val remaining = conversationDeadline - SystemClock.elapsedRealtime()
+            if (remaining <= 0L) {
+                Log.i(TAG, "Conversation timeout: returning to standby")
+                endConversation()
+            } else {
+                Log.i(TAG, "Conversation active: ${remaining}ms remaining")
+                conversationHandler.postDelayed(this, CONVERSATION_TICK_MS)
+            }
+        }
+    }
+
     private val frameHandler = Handler(Looper.getMainLooper())
     private val frameRunnable = object : Runnable {
         override fun run() {
@@ -176,9 +194,40 @@ class MainActivity : ComponentActivity() {
     private fun startListeningCycle() {
         service.startListening()
         audioCapture.startCapture { audio ->
-            runOnUiThread { service.setThinking() }
+            runOnUiThread {
+                // The user spoke: pause the inactivity timer while we process.
+                cancelConversationTimer()
+                service.setThinking()
+            }
             backendClient.sendAudio(audio)
         }
+    }
+
+    /**
+     * Continuous conversation: keep listening for the next question without a
+     * wake word, and arm a 60s inactivity timer that falls back to STANDBY.
+     */
+    private fun startContinuousConversation() {
+        resetConversationTimer()
+        startListeningCycle()
+    }
+
+    private fun resetConversationTimer() {
+        conversationHandler.removeCallbacks(conversationTick)
+        conversationDeadline =
+            SystemClock.elapsedRealtime() + Constants.CONVERSATION_TIMEOUT_MS
+        conversationHandler.postDelayed(conversationTick, CONVERSATION_TICK_MS)
+    }
+
+    private fun cancelConversationTimer() {
+        conversationHandler.removeCallbacks(conversationTick)
+    }
+
+    /** Inactivity timed out: stop listening and require the wake word again. */
+    private fun endConversation() {
+        cancelConversationTimer()
+        audioCapture.stopCapture()
+        returnToStandby()
     }
 
     private fun handleResponse(response: CyberbotResponse) {
@@ -188,8 +237,8 @@ class MainActivity : ComponentActivity() {
         }
         service.setSpeaking()
 
-        // After speaking, go back to idle and listen for the wake word again.
-        val onComplete: () -> Unit = { runOnUiThread { returnToStandby() } }
+        // After speaking, stay in continuous conversation for 60s (no wake word).
+        val onComplete: () -> Unit = { runOnUiThread { startContinuousConversation() } }
         val url = response.tts_url
 
         when {
@@ -219,6 +268,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        conversationHandler.removeCallbacks(conversationTick)
         frameHandler.removeCallbacks(frameRunnable)
         cameraManager.release()
         audioCapture.stopCapture()
@@ -231,5 +281,6 @@ class MainActivity : ComponentActivity() {
         private const val TAG = "MainActivity"
         private const val PREFS_NAME = "cyberbot"
         private const val FRAME_INTERVAL_MS = 30000L
+        private const val CONVERSATION_TICK_MS = 10000L
     }
 }

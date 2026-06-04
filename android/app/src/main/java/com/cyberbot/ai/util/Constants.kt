@@ -10,5 +10,8 @@ object Constants {
     const val SILENCE_THRESHOLD = 50
     const val SILENCE_DURATION_MS = 1500L
 
+    // Continuous conversation window after a reply (no wake word needed)
+    const val CONVERSATION_TIMEOUT_MS = 60000L
+
     const val SESSION_ID_KEY = "cyberbot_session_id"
 }
