@@ -51,6 +51,19 @@ async def conversation_ws(websocket: WebSocket, session_id: str) -> None:
             data = await websocket.receive_json()
             # Ensure the session id from the path is authoritative.
             data["session_id"] = session_id
+
+            # Camera frames are logged only for now (not yet processed) and must
+            # not interrupt the conversation.
+            if data.get("type") == "camera_frame":
+                frame_b64 = data.get("data", "") or ""
+                logger.info(
+                    "Received camera frame ({} base64 chars) for session {}",
+                    len(frame_b64),
+                    session_id,
+                )
+                await websocket.send_json({"state": CyberbotState.STANDBY.value})
+                continue
+
             request = MessageRequest(**data)
 
             try:

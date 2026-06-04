@@ -8,6 +8,8 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.core.UseCase
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
@@ -31,8 +33,12 @@ class CameraManager(
         ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
 
-    /** Bind the front camera to the lifecycle. Safe to call once after permission. */
-    fun initialize() {
+    /**
+     * Bind the front camera to the lifecycle. Safe to call once after the CAMERA
+     * permission is granted. If [surfaceProvider] is supplied, a Preview use case
+     * is also bound (e.g. a hidden PreviewView) so the camera stream is active.
+     */
+    fun initialize(surfaceProvider: Preview.SurfaceProvider? = null) {
         if (!hasPermission()) {
             Log.e(TAG, "CAMERA permission not granted; cannot initialize")
             return
@@ -49,13 +55,20 @@ class CameraManager(
                     .build()
                 imageCapture = capture
 
+                val useCases = mutableListOf<UseCase>(capture)
+                if (surfaceProvider != null) {
+                    val preview = Preview.Builder().build()
+                    preview.setSurfaceProvider(surfaceProvider)
+                    useCases.add(preview)
+                }
+
                 provider.unbindAll()
                 provider.bindToLifecycle(
                     lifecycleOwner,
                     CameraSelector.DEFAULT_FRONT_CAMERA,
-                    capture,
+                    *useCases.toTypedArray(),
                 )
-                Log.i(TAG, "Front camera initialized")
+                Log.i(TAG, "Front camera initialized (preview=${surfaceProvider != null})")
             } catch (e: Exception) {
                 Log.e(TAG, "Camera initialization failed", e)
             }

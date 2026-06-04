@@ -79,6 +79,16 @@ class BackendClient(
         Log.i(TAG, "sendAudio (${audioBytes.size} bytes) -> sent=$sent")
     }
 
+    fun sendCameraFrame(jpegBytes: ByteArray) {
+        val b64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
+        val payload = mapOf(
+            "type" to "camera_frame",
+            "data" to b64,
+        )
+        val sent = webSocket?.send(gson.toJson(payload)) ?: false
+        Log.i(TAG, "sendCameraFrame (${jpegBytes.size} bytes) -> sent=$sent")
+    }
+
     private fun openSocket() {
         val url = "${Constants.BACKEND_WS_URL}/$sessionId"
         Log.i(TAG, "Connecting to $url (attempt ${reconnectAttempts + 1})")

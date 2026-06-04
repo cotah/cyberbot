@@ -11,13 +11,19 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.view.PreviewView
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.cyberbot.ai.audio.AudioCaptureManager
 import com.cyberbot.ai.audio.AudioPlaybackManager
 import com.cyberbot.ai.audio.WakeWordDetector
+import com.cyberbot.ai.camera.CameraManager
 import com.cyberbot.ai.hologram.HologramRenderer
 import com.cyberbot.ai.kiosk.KioskManager
 import com.cyberbot.ai.network.BackendClient
@@ -42,8 +48,21 @@ class MainActivity : ComponentActivity() {
     private lateinit var audioCapture: AudioCaptureManager
     private lateinit var audioPlayback: AudioPlaybackManager
     private lateinit var wakeWordDetector: WakeWordDetector
+    private lateinit var cameraManager: CameraManager
     private lateinit var backendClient: BackendClient
     private lateinit var sessionId: String
+
+    @Volatile private var previewView: PreviewView? = null
+    private val frameHandler = Handler(Looper.getMainLooper())
+    private val frameRunnable = object : Runnable {
+        override fun run() {
+            cameraManager.captureFrame { bytes ->
+                Log.i(TAG, "Camera frame captured: ${bytes.size} bytes")
+                backendClient.sendCameraFrame(bytes)
+            }
+            frameHandler.postDelayed(this, FRAME_INTERVAL_MS)
+        }
+    }
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -53,6 +72,11 @@ class MainActivity : ComponentActivity() {
             } else {
                 Log.e(TAG, "RECORD_AUDIO denied; cannot operate")
                 service.setError()
+            }
+            if (result[Manifest.permission.CAMERA] == true) {
+                startCamera()
+            } else {
+                Log.w(TAG, "CAMERA denied; camera frame capture disabled")
             }
         }
 
@@ -66,6 +90,7 @@ class MainActivity : ComponentActivity() {
         wakeWordDetector = WakeWordDetector(applicationContext) {
             runOnUiThread { onWakeWord() }
         }
+        cameraManager = CameraManager(this, this)
         sessionId = getOrCreateSessionId()
 
         backendClient = BackendClient(
@@ -80,7 +105,15 @@ class MainActivity : ComponentActivity() {
         setContent {
             CyberBotTheme {
                 val state by service.state.collectAsState()
-                HologramRenderer(state = state, modifier = Modifier.fillMaxSize())
+                Box(modifier = Modifier.fillMaxSize()) {
+                    HologramRenderer(state = state, modifier = Modifier.fillMaxSize())
+                    // Tiny, effectively-hidden preview that keeps the camera
+                    // stream active so frames can be captured on demand.
+                    AndroidView(
+                        factory = { ctx -> PreviewView(ctx).also { previewView = it } },
+                        modifier = Modifier.size(1.dp),
+                    )
+                }
             }
         }
 
@@ -117,6 +150,14 @@ class MainActivity : ComponentActivity() {
         backendClient.connect(sessionId)
         // Idle in STANDBY, listening for the "hey cyberbot" wake word.
         returnToStandby()
+    }
+
+    /** Initialize the front camera and begin periodic frame capture. */
+    private fun startCamera() {
+        cameraManager.initialize(previewView?.surfaceProvider)
+        frameHandler.removeCallbacks(frameRunnable)
+        frameHandler.postDelayed(frameRunnable, FRAME_INTERVAL_MS)
+        Log.i(TAG, "Camera started; capturing a frame every ${FRAME_INTERVAL_MS}ms")
     }
 
     /** Go idle: STANDBY state + wake-word listening. */
@@ -178,6 +219,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        frameHandler.removeCallbacks(frameRunnable)
+        cameraManager.release()
         audioCapture.stopCapture()
         audioPlayback.stop()
         wakeWordDetector.shutdown()
@@ -187,5 +230,6 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val TAG = "MainActivity"
         private const val PREFS_NAME = "cyberbot"
+        private const val FRAME_INTERVAL_MS = 30000L
     }
 }
