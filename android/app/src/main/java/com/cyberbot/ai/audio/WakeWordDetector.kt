@@ -1,35 +1,40 @@
 package com.cyberbot.ai.audio
 
+import android.annotation.SuppressLint
 import android.content.Context
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.util.Log
+import com.cyberbot.ai.util.Constants
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
-import org.vosk.android.RecognitionListener
-import org.vosk.android.SpeechService
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.URL
 import java.util.zip.ZipInputStream
+import kotlin.math.abs
 
 /**
  * Offline "Hey CyberBot" wake-word detector built on Vosk.
  *
- * On first run the small English model is downloaded and unzipped into
- * ``filesDir/vosk-model``. Then Vosk listens continuously in the background and
- * fires [onWakeWordDetected] as soon as it hears "cyberbot" / "cyber bot".
+ * Unlike Vosk's bundled SpeechService (which opens its own microphone with
+ * AudioSource.VOICE_RECOGNITION — silent on the YF-088D), this feeds the Vosk
+ * [Recognizer] directly from our own [AudioRecord] using
+ * AudioSource.VOICE_COMMUNICATION, the source that actually captures audio on
+ * this device.
  *
- * Note: Vosk opens its own microphone (AudioSource.VOICE_RECOGNITION). Call
- * [stop] before starting [AudioCaptureManager] so the two never fight over the
- * mic, and [start] again afterwards to resume wake-word listening.
+ * On first run the small English model is downloaded and unzipped into
+ * ``filesDir/vosk-model``. Then the recognizer listens continuously and fires
+ * [onWakeWordDetected] as soon as it hears "cyberbot" / "cyber bot".
  */
 class WakeWordDetector(
     private val context: Context,
@@ -39,47 +44,46 @@ class WakeWordDetector(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     @Volatile private var model: Model? = null
-    @Volatile private var speechService: SpeechService? = null
+    @Volatile private var audioRecord: AudioRecord? = null
+    @Volatile private var listening = false
     @Volatile private var triggered = false
+    private var captureJob: Job? = null
 
     /** Load the model if needed and begin (or resume) wake-word listening. */
     fun start() {
-        triggered = false
-        if (speechService != null) {
+        if (listening) {
             Log.d(TAG, "Wake word already listening")
             return
         }
-        scope.launch {
+        triggered = false
+        listening = true
+        captureJob = scope.launch {
             try {
                 if (model == null) {
                     val modelDir = ensureModel()
                     model = Model(modelDir.absolutePath)
                     Log.i(TAG, "Vosk model loaded from ${modelDir.absolutePath}")
                 }
-                val loaded = model ?: return@launch
-                withContext(Dispatchers.Main) { beginListening(loaded) }
+                val loaded = model
+                if (loaded == null) {
+                    Log.e(TAG, "Model unavailable; cannot start wake-word")
+                    listening = false
+                    return@launch
+                }
+                runRecognitionLoop(loaded)
             } catch (e: Exception) {
                 Log.e(TAG, "WakeWordDetector start failed", e)
+                listening = false
             }
         }
     }
 
     /** Stop listening and release the microphone (model stays loaded). */
     fun stop() {
-        speechService?.let { service ->
-            try {
-                service.stop()
-            } catch (e: Exception) {
-                Log.e(TAG, "SpeechService stop failed", e)
-            }
-            try {
-                service.shutdown()
-            } catch (e: Exception) {
-                Log.e(TAG, "SpeechService shutdown failed", e)
-            }
-        }
-        speechService = null
-        Log.i(TAG, "Wake word listening stopped")
+        // The capture loop checks this flag every chunk (~256 ms) and then
+        // releases the AudioRecord/Recognizer in its finally block.
+        listening = false
+        Log.i(TAG, "Wake word stop requested")
     }
 
     /** Fully release the detector (model included). */
@@ -95,27 +99,68 @@ class WakeWordDetector(
         Log.i(TAG, "WakeWordDetector shut down")
     }
 
-    private fun beginListening(loadedModel: Model) {
-        try {
-            val recognizer = Recognizer(loadedModel, SAMPLE_RATE)
-            val service = SpeechService(recognizer, SAMPLE_RATE)
-            speechService = service
-            service.startListening(listener)
-            Log.i(TAG, "Wake word listening started (say 'hey cyberbot')")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to begin wake-word listening", e)
-        }
-    }
+    @SuppressLint("MissingPermission") // RECORD_AUDIO is verified by the caller.
+    private fun runRecognitionLoop(loadedModel: Model) {
+        val recognizer = Recognizer(loadedModel, SAMPLE_RATE_F)
+        val minBuffer = AudioRecord.getMinBufferSize(
+            Constants.SAMPLE_RATE,
+            Constants.CHANNEL_CONFIG,
+            Constants.AUDIO_FORMAT,
+        )
+        val bufferSizeBytes = maxOf(minBuffer, CHUNK_SAMPLES * 2)
 
-    private val listener = object : RecognitionListener {
-        override fun onPartialResult(hypothesis: String?) = checkHypothesis(hypothesis)
-        override fun onResult(hypothesis: String?) = checkHypothesis(hypothesis)
-        override fun onFinalResult(hypothesis: String?) = checkHypothesis(hypothesis)
-        override fun onError(exception: Exception?) {
-            Log.e(TAG, "Vosk error: ${exception?.message}", exception)
+        val record = AudioRecord(
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            Constants.SAMPLE_RATE,
+            Constants.CHANNEL_CONFIG,
+            Constants.AUDIO_FORMAT,
+            bufferSizeBytes,
+        )
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            Log.e(TAG, "Wake-word AudioRecord failed to initialize")
+            record.release()
+            recognizer.close()
+            listening = false
+            return
         }
-        override fun onTimeout() {
-            Log.d(TAG, "Vosk timeout")
+        audioRecord = record
+
+        val buffer = ShortArray(CHUNK_SAMPLES)
+        try {
+            record.startRecording()
+            Log.i(TAG, "Wake word capture started (VOICE_COMMUNICATION)")
+
+            while (listening) {
+                val read = record.read(buffer, 0, buffer.size)
+                if (read <= 0) continue
+
+                // Log amplitude to confirm the mic is actually capturing.
+                var sum = 0L
+                for (i in 0 until read) sum += abs(buffer[i].toInt())
+                val avgAmplitude = (sum / read).toInt()
+                Log.d(TAG, "Wake chunk amplitude: $avgAmplitude")
+
+                val isFinal = recognizer.acceptWaveForm(buffer, read)
+                val hypothesis =
+                    if (isFinal) recognizer.result else recognizer.partialResult
+                checkHypothesis(hypothesis)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Wake word capture loop error", e)
+        } finally {
+            try {
+                record.stop()
+            } catch (e: Exception) {
+                Log.e(TAG, "AudioRecord stop failed", e)
+            }
+            record.release()
+            audioRecord = null
+            try {
+                recognizer.close()
+            } catch (e: Exception) {
+                Log.e(TAG, "Recognizer close failed", e)
+            }
+            Log.i(TAG, "Wake word capture stopped")
         }
     }
 
@@ -187,7 +232,8 @@ class WakeWordDetector(
 
     companion object {
         private const val TAG = "WakeWordDetector"
-        private const val SAMPLE_RATE = 16000.0f
+        private const val SAMPLE_RATE_F = 16000.0f
+        private const val CHUNK_SAMPLES = 4096
         private const val MODEL_URL =
             "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
     }
