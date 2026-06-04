@@ -54,6 +54,34 @@ def is_connected() -> bool:
     return _client is not None
 
 
+async def generate_embedding(text: str) -> Optional[list[float]]:
+    """Generate a 1536-dim embedding for ``text`` via OpenAI.
+
+    Uses ``text-embedding-3-small``. Returns None on failure or when OpenAI is
+    not configured, so callers can degrade gracefully.
+    """
+    if not settings.OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY missing; cannot generate embedding")
+        return None
+
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+        def _op() -> list[float]:
+            response = client.embeddings.create(
+                model="text-embedding-3-small",
+                input=text,
+            )
+            return response.data[0].embedding
+
+        return await asyncio.to_thread(_op)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("generate_embedding failed: {}", exc)
+        return None
+
+
 async def save_message(session_id: str, role: str, content: str) -> None:
     """Persist a single conversation message."""
     if _client is None:
@@ -96,33 +124,57 @@ async def get_history(session_id: str, limit: int = 20) -> list[dict[str, str]]:
         return []
 
 
-async def save_memory(content: str, embedding: list[float]) -> None:
-    """Persist a long-term memory together with its embedding vector."""
+async def save_memory(content: str, category: str = "general") -> None:
+    """Generate an embedding for ``content`` and persist it as a memory."""
     if _client is None:
+        return
+
+    embedding = await generate_embedding(content)
+    if embedding is None:
+        logger.warning("save_memory skipped (embedding unavailable)")
         return
 
     def _op() -> None:
         _client.table("memories").insert(
-            {"content": content, "embedding": embedding}
+            {"content": content, "embedding": embedding, "category": category}
         ).execute()
 
     try:
         await asyncio.to_thread(_op)
+        logger.info("Saved memory ({} chars, category={})", len(content), category)
     except Exception as exc:  # noqa: BLE001
         logger.warning("save_memory failed: {}", exc)
 
 
 async def search_memories(
-    embedding: list[float], limit: int = 5
+    query_text: str, limit: int = 5, match_threshold: float = 0.3
 ) -> list[dict[str, Any]]:
-    """Return the most similar memories via pgvector cosine distance."""
+    """Return memories most similar to ``query_text`` via pgvector.
+
+    Generates the query embedding, then calls the ``match_memories`` RPC. Returns
+    rows ordered by similarity (highest first); empty list on any failure.
+
+    ``match_threshold`` defaults to 0.3 because text-embedding-3-small similarity
+    scores for related sentences typically sit in the 0.4-0.6 range; the RPC's
+    own 0.7 default is too strict and filters out useful matches.
+    """
     if _client is None:
         return []
 
+    embedding = await generate_embedding(query_text)
+    if embedding is None:
+        return []
+
+    # The RPC takes a float8[] (cast to vector internally), so the plain list
+    # serializes cleanly as a JSON number array via PostgREST.
     def _op() -> list[dict[str, Any]]:
         response = _client.rpc(
             "match_memories",
-            {"query_embedding": embedding, "match_count": limit},
+            {
+                "query_embedding": embedding,
+                "match_threshold": match_threshold,
+                "match_count": limit,
+            },
         ).execute()
         return response.data or []
 

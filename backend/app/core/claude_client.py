@@ -39,6 +39,36 @@ def _detect_language(text: str) -> str:
     return detect_language(text)
 
 
+# Phrases that suggest the user is stating a durable fact about themselves.
+_FACT_MARKERS: tuple[str, ...] = (
+    "my name is", "i am ", "i'm ", "i like", "i love", "i prefer", "i live",
+    "i work", "my favorite", "remember that",
+    "meu nome", "me chamo", "eu moro", "eu gosto", "eu trabalho", "eu prefiro",
+    "meu projeto", "minha preferência",
+    "mi nombre", "me llamo", "me gusta", "vivo en", "trabajo en", "prefiero",
+)
+
+
+def _build_system_prompt(memories: list[dict[str, Any]]) -> str:
+    """Append relevant long-term memories to the base system prompt."""
+    lines = [f"- {m['content']}" for m in memories if m.get("content")]
+    if not lines:
+        return SYSTEM_PROMPT
+    return (
+        SYSTEM_PROMPT
+        + "\n\nRelevant memories about the user:\n"
+        + "\n".join(lines)
+    )
+
+
+def _extract_user_fact(user_message: str) -> Optional[str]:
+    """Return the user message if it appears to state a durable personal fact."""
+    lowered = user_message.lower()
+    if any(marker in lowered for marker in _FACT_MARKERS):
+        return user_message.strip()
+    return None
+
+
 def _error_response(session_id: str, message: str) -> CyberbotResponse:
     """Build a uniform error response."""
     return CyberbotResponse(
@@ -87,8 +117,17 @@ async def process_message(
 
         client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
-        # Load recent history so the model has conversational context.
+        # RAG: load recent history (as message turns) and relevant long-term
+        # memories (injected into the system prompt).
         history = await memory.get_history(session_id)
+        memories = await memory.search_memories(user_message)
+        system_prompt = _build_system_prompt(memories)
+        logger.info(
+            "RAG context: {} history msgs, {} relevant memories",
+            len(history),
+            len(memories),
+        )
+
         messages: list[dict[str, Any]] = [
             {"role": item["role"], "content": item["content"]} for item in history
         ]
@@ -101,7 +140,7 @@ async def process_message(
             kwargs: dict[str, Any] = {
                 "model": MODEL,
                 "max_tokens": MAX_TOKENS,
-                "system": SYSTEM_PROMPT,
+                "system": system_prompt,
                 "messages": messages,
             }
             if tools:
@@ -145,6 +184,16 @@ async def process_message(
         # state, emitted via on_state while a tool runs (see loop above).
         state = CyberbotState.SPEAKING
         emotion = "informative"
+
+        # Persist the turn for future RAG context.
+        await memory.save_message(session_id, "user", user_message)
+        if reply:
+            await memory.save_message(session_id, "assistant", reply)
+
+        # If the user stated a durable personal fact, store it as a memory.
+        fact = _extract_user_fact(user_message)
+        if fact:
+            await memory.save_memory(fact, category="user_fact")
 
         logger.info(
             "Claude turn complete (state={}, tool={}, lang={})",

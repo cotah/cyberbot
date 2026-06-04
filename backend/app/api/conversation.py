@@ -17,7 +17,7 @@ import base64
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
-from app.core import claude_client, memory, stt, tts
+from app.core import claude_client, stt, tts
 from app.models.conversation import MessageRequest
 from app.models.response import CyberbotResponse, CyberbotState
 from app.tools import registry
@@ -97,9 +97,8 @@ async def conversation_ws(websocket: WebSocket, session_id: str) -> None:
                             "TTS failed; response tts_url will be null: {}", exc
                         )
 
-                # Persist the turn to memory (best-effort).
-                await memory.save_message(session_id, "user", user_text)
-                await memory.save_message(session_id, "assistant", response.reply)
+                # Note: the turn is persisted inside claude_client.process_message
+                # (RAG), so we do not save it again here to avoid duplicates.
 
                 # Final response (includes state SPEAKING/EXECUTING/ERROR).
                 await websocket.send_json(response.model_dump())
