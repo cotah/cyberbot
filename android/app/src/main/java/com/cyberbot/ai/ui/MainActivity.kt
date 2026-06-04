@@ -2,7 +2,10 @@ package com.cyberbot.ai.ui
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -81,7 +84,22 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        kioskManager.enableKioskMode(this)
+
+        try {
+            kioskManager.enableKioskMode(this)
+        } catch (e: Exception) {
+            Log.e(TAG, "enableKioskMode call failed", e)
+        }
+
+        // Auto-dismiss the "App is pinned" system dialog
+        Handler(Looper.getMainLooper()).postDelayed({
+            try {
+                val dismissIntent = Intent(Intent.ACTION_CLOSE_SYSTEM_DIALOGS)
+                sendBroadcast(dismissIntent)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to dismiss pin dialog", e)
+            }
+        }, 500)
     }
 
     private fun requestPermissions() {

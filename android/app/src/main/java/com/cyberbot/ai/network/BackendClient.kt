@@ -22,6 +22,10 @@ import java.util.concurrent.TimeUnit
  * Connects to [Constants.BACKEND_WS_URL]/{sessionId}, parses streamed state
  * updates and full responses, and automatically reconnects up to
  * [MAX_RECONNECT_ATTEMPTS] times with an exponential backoff (2s, 4s, 8s).
+ *
+ * Important: a single connection failure does NOT surface an error. The
+ * ``onError`` callback (which drives the ERROR state) is only invoked once the
+ * initial attempt plus all [MAX_RECONNECT_ATTEMPTS] retries have failed.
  */
 class BackendClient(
     private val onStateUpdate: (CyberbotState) -> Unit,
@@ -79,14 +83,16 @@ class BackendClient(
 
     private fun openSocket() {
         val url = "${Constants.BACKEND_WS_URL}/$sessionId"
-        Log.i(TAG, "Connecting to $url")
+        val attempt = reconnectAttempts + 1
+        val totalAttempts = MAX_RECONNECT_ATTEMPTS + 1
+        Log.i(TAG, "Connecting to $url (attempt $attempt/$totalAttempts)")
         val request = Request.Builder().url(url).build()
         webSocket = client.newWebSocket(request, listener)
     }
 
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            Log.i(TAG, "WebSocket open")
+            Log.i(TAG, "WebSocket connected successfully to $sessionId (HTTP ${response.code})")
             reconnectAttempts = 0
         }
 
@@ -106,8 +112,16 @@ class BackendClient(
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            Log.e(TAG, "WebSocket failure: ${t.message}")
-            onError(t.message ?: "WebSocket failure")
+            val httpInfo =
+                if (response != null) "HTTP ${response.code} ${response.message}"
+                else "no HTTP response (transport-level failure)"
+            Log.e(
+                TAG,
+                "WebSocket failure [$httpInfo]: ${t.javaClass.simpleName}: ${t.message}",
+                t,
+            )
+            // Do NOT surface ERROR on a single failure. Retry first; onError is
+            // only emitted once all reconnect attempts are exhausted.
             if (!manuallyClosed) scheduleReconnect()
         }
     }
@@ -137,13 +151,20 @@ class BackendClient(
 
     private fun scheduleReconnect() {
         if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-            Log.e(TAG, "Max reconnect attempts reached")
-            onError("Connection lost. Max reconnect attempts reached.")
+            Log.e(
+                TAG,
+                "All reconnect attempts failed " +
+                    "(${MAX_RECONNECT_ATTEMPTS + 1} total connection attempts); surfacing ERROR",
+            )
+            onError("Connection lost after ${MAX_RECONNECT_ATTEMPTS + 1} attempts.")
             return
         }
         val delayMs = 2000L * (1 shl reconnectAttempts) // 2s, 4s, 8s
         reconnectAttempts++
-        Log.w(TAG, "Reconnecting in ${delayMs}ms (attempt $reconnectAttempts/$MAX_RECONNECT_ATTEMPTS)")
+        Log.w(
+            TAG,
+            "Reconnect attempt $reconnectAttempts/$MAX_RECONNECT_ATTEMPTS scheduled in ${delayMs}ms",
+        )
         scheduler.schedule(
             { if (!manuallyClosed) openSocket() },
             delayMs,
