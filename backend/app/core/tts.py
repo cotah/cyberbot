@@ -1,15 +1,18 @@
 """Text-to-speech synthesis.
 
-Provider selection follows the environment:
-- development -> OpenAI TTS (cheap, fast to iterate on)
-- production  -> ElevenLabs (higher quality, configurable voice)
+Provider preference follows the environment:
+- production  -> ElevenLabs first, OpenAI as fallback
+- development -> OpenAI first, ElevenLabs as fallback
 
+The fallback guarantees a turn still gets audio when the preferred provider is
+not configured or fails (e.g. ElevenLabs credentials missing in production).
 Both providers return MP3 audio bytes. SDKs are imported lazily so missing
 dependencies never block startup. ``detect_language`` provides a dependency
 free best-effort guess between English, Portuguese and Spanish.
 """
 
 import asyncio
+from typing import Awaitable, Callable
 
 from loguru import logger
 
@@ -42,12 +45,13 @@ def detect_language(text: str) -> str:
 
 
 async def _synthesize_openai(text: str) -> bytes:
-    """Synthesize speech with OpenAI TTS (used in development)."""
+    """Synthesize speech with OpenAI TTS."""
     if not settings.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured")
 
     from openai import OpenAI
 
+    logger.debug("OpenAI TTS: requesting model=tts-1 voice=alloy")
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
     def _op() -> bytes:
@@ -59,11 +63,13 @@ async def _synthesize_openai(text: str) -> bytes:
         )
         return response.content
 
-    return await asyncio.to_thread(_op)
+    audio = await asyncio.to_thread(_op)
+    logger.debug("OpenAI TTS: received {} bytes", len(audio))
+    return audio
 
 
 async def _synthesize_elevenlabs(text: str) -> bytes:
-    """Synthesize speech with ElevenLabs (used in production)."""
+    """Synthesize speech with ElevenLabs."""
     if not settings.ELEVENLABS_API_KEY or not settings.ELEVENLABS_VOICE_ID:
         raise RuntimeError(
             "ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID must be configured"
@@ -71,6 +77,10 @@ async def _synthesize_elevenlabs(text: str) -> bytes:
 
     from elevenlabs.client import ElevenLabs
 
+    logger.debug(
+        "ElevenLabs TTS: requesting voice_id={} model=eleven_multilingual_v2",
+        settings.ELEVENLABS_VOICE_ID,
+    )
     client = ElevenLabs(api_key=settings.ELEVENLABS_API_KEY)
 
     def _op() -> bytes:
@@ -82,37 +92,66 @@ async def _synthesize_elevenlabs(text: str) -> bytes:
         )
         return b"".join(audio_stream)
 
-    return await asyncio.to_thread(_op)
+    audio = await asyncio.to_thread(_op)
+    logger.debug("ElevenLabs TTS: received {} bytes", len(audio))
+    return audio
+
+
+# Provider registry: name -> async synthesizer.
+_Synthesizer = Callable[[str], Awaitable[bytes]]
+_PROVIDERS: dict[str, _Synthesizer] = {
+    "elevenlabs": _synthesize_elevenlabs,
+    "openai": _synthesize_openai,
+}
+
+
+def _provider_order() -> list[str]:
+    """Return the ordered list of providers to try for the current env."""
+    if settings.is_production:
+        return ["elevenlabs", "openai"]
+    return ["openai", "elevenlabs"]
 
 
 async def synthesize_speech(text: str, language: str = "en") -> bytes:
-    """Convert text into MP3 audio bytes.
-
-    The provider is chosen from ``ENVIRONMENT``: OpenAI in development,
-    ElevenLabs in production.
+    """Convert text into MP3 audio bytes, trying providers in preference order.
 
     Args:
         text: The text to speak.
         language: One of ``en``, ``pt`` or ``es`` (kept for future per-language
             voice selection; current providers are multilingual).
 
+    Returns:
+        MP3 audio bytes from the first provider that succeeds.
+
     Raises:
-        RuntimeError: If the selected provider is not configured or fails.
+        RuntimeError: If the text is empty or every provider fails.
     """
     if not text.strip():
         raise RuntimeError("Cannot synthesize empty text")
 
-    try:
-        if settings.is_production:
-            audio = await _synthesize_elevenlabs(text)
-            provider = "elevenlabs"
-        else:
-            audio = await _synthesize_openai(text)
-            provider = "openai"
-        logger.info(
-            "Synthesized {} bytes via {} (lang={})", len(audio), provider, language
-        )
-        return audio
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Speech synthesis failed: {}", exc)
-        raise RuntimeError(f"Speech synthesis failed: {exc}") from exc
+    order = _provider_order()
+    logger.info(
+        "TTS request: {} chars, lang={}, env={}, provider order={}",
+        len(text),
+        language,
+        settings.ENVIRONMENT,
+        order,
+    )
+
+    errors: list[str] = []
+    for name in order:
+        synthesizer = _PROVIDERS[name]
+        try:
+            logger.info("TTS: attempting provider '{}'", name)
+            audio = await synthesizer(text)
+            if not audio:
+                raise RuntimeError("provider returned empty audio")
+            logger.info("TTS: provider '{}' succeeded ({} bytes)", name, len(audio))
+            return audio
+        except Exception as exc:  # noqa: BLE001 - try the next provider
+            logger.warning("TTS: provider '{}' failed: {}", name, exc)
+            errors.append(f"{name}: {exc}")
+
+    detail = "; ".join(errors)
+    logger.error("TTS: all providers failed -> {}", detail)
+    raise RuntimeError(f"Speech synthesis failed (all providers): {detail}")

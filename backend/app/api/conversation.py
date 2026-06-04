@@ -88,8 +88,14 @@ async def conversation_ws(websocket: WebSocket, session_id: str) -> None:
                             "data:audio/mp3;base64,"
                             + base64.b64encode(audio).decode("utf-8")
                         )
-                    except RuntimeError as exc:
-                        logger.warning("TTS unavailable, sending text only: {}", exc)
+                        logger.info(
+                            "TTS attached to response ({} audio bytes)", len(audio)
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        # Do not fail the turn; surface clearly that tts_url is null.
+                        logger.error(
+                            "TTS failed; response tts_url will be null: {}", exc
+                        )
 
                 # Persist the turn to memory (best-effort).
                 await memory.save_message(session_id, "user", user_text)
