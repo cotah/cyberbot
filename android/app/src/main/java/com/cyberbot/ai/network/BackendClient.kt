@@ -20,12 +20,10 @@ import java.util.concurrent.TimeUnit
  * WebSocket client for the CyberBot FastAPI backend.
  *
  * Connects to [Constants.BACKEND_WS_URL]/{sessionId}, parses streamed state
- * updates and full responses, and automatically reconnects up to
- * [MAX_RECONNECT_ATTEMPTS] times with an exponential backoff (2s, 4s, 8s).
- *
- * Important: a single connection failure does NOT surface an error. The
- * ``onError`` callback (which drives the ERROR state) is only invoked once the
- * initial attempt plus all [MAX_RECONNECT_ATTEMPTS] retries have failed.
+ * updates and full responses, and reconnects INDEFINITELY with a capped
+ * exponential backoff (2s, 4s, 8s, 16s, then 30s). On a successful reconnect it
+ * notifies the UI to return to STANDBY. The connection is only abandoned when
+ * [disconnect] is called explicitly.
  */
 class BackendClient(
     private val onStateUpdate: (CyberbotState) -> Unit,
@@ -83,17 +81,24 @@ class BackendClient(
 
     private fun openSocket() {
         val url = "${Constants.BACKEND_WS_URL}/$sessionId"
-        val attempt = reconnectAttempts + 1
-        val totalAttempts = MAX_RECONNECT_ATTEMPTS + 1
-        Log.i(TAG, "Connecting to $url (attempt $attempt/$totalAttempts)")
+        Log.i(TAG, "Connecting to $url (attempt ${reconnectAttempts + 1})")
         val request = Request.Builder().url(url).build()
         webSocket = client.newWebSocket(request, listener)
     }
 
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            Log.i(TAG, "WebSocket connected successfully to $sessionId (HTTP ${response.code})")
+            val wasReconnect = reconnectAttempts > 0
+            Log.i(
+                TAG,
+                "WebSocket connected to $sessionId (HTTP ${response.code})" +
+                    if (wasReconnect) " [recovered after $reconnectAttempts attempt(s)]" else "",
+            )
             reconnectAttempts = 0
+            // After a recovered connection, return the assistant to STANDBY.
+            if (wasReconnect) {
+                onStateUpdate(CyberbotState.STANDBY)
+            }
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -150,21 +155,13 @@ class BackendClient(
     }
 
     private fun scheduleReconnect() {
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-            Log.e(
-                TAG,
-                "All reconnect attempts failed " +
-                    "(${MAX_RECONNECT_ATTEMPTS + 1} total connection attempts); surfacing ERROR",
-            )
-            onError("Connection lost after ${MAX_RECONNECT_ATTEMPTS + 1} attempts.")
-            return
-        }
-        val delayMs = 2000L * (1 shl reconnectAttempts) // 2s, 4s, 8s
+        if (manuallyClosed) return
+
+        // Capped exponential backoff: 2s, 4s, 8s, 16s, then 30s forever.
+        val exponent = reconnectAttempts.coerceAtMost(MAX_BACKOFF_EXPONENT)
+        val delayMs = minOf(BASE_BACKOFF_MS shl exponent, MAX_BACKOFF_MS)
         reconnectAttempts++
-        Log.w(
-            TAG,
-            "Reconnect attempt $reconnectAttempts/$MAX_RECONNECT_ATTEMPTS scheduled in ${delayMs}ms",
-        )
+        Log.w(TAG, "Reconnect attempt #$reconnectAttempts scheduled in ${delayMs}ms")
         scheduler.schedule(
             { if (!manuallyClosed) openSocket() },
             delayMs,
@@ -174,7 +171,9 @@ class BackendClient(
 
     companion object {
         private const val TAG = "BackendClient"
-        private const val MAX_RECONNECT_ATTEMPTS = 3
         private const val NORMAL_CLOSURE = 1000
+        private const val BASE_BACKOFF_MS = 2000L
+        private const val MAX_BACKOFF_MS = 30000L
+        private const val MAX_BACKOFF_EXPONENT = 4 // 2000 << 4 = 32000, capped to 30000
     }
 }
