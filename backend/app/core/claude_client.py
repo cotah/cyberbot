@@ -29,8 +29,43 @@ SYSTEM_PROMPT: str = (
     "Supported languages: English, Portuguese (BR), Spanish.\n"
     "Never mix languages in a single response.\n"
     "Be concise, helpful, and slightly futuristic in personality.\n"
-    "Current emotional state and context will be provided."
+    "Current emotional state and context will be provided.\n"
+    "Always end your reply with an emotion tag on its own, in this exact "
+    "format: [[emotion:VALUE]].\n"
+    "Choose VALUE from: greeting, funny, celebration, weather_sun, "
+    "weather_rain, weather_storm, confused, explaining, informative.\n"
+    "Match the emotion to your response content. The tag is hidden from the "
+    "user, so write it verbatim and never describe it in the spoken text."
 )
+
+# Emotions the avatar knows how to animate; anything else falls back below.
+_ALLOWED_EMOTIONS: frozenset[str] = frozenset(
+    {
+        "greeting", "funny", "celebration", "weather_sun", "weather_rain",
+        "weather_storm", "confused", "explaining", "informative",
+    }
+)
+_DEFAULT_EMOTION: str = "informative"
+# Matches the hidden marker the model appends, e.g. "[[emotion:funny]]".
+_EMOTION_TAG_RE = re.compile(r"\[\[\s*emotion\s*:\s*([a-z_]+)\s*\]\]", re.IGNORECASE)
+
+
+def _extract_emotion(reply: str) -> tuple[str, str]:
+    """Pull the emotion tag out of the reply.
+
+    Returns (clean_reply, emotion). The tag is stripped from the reply so it is
+    never spoken or displayed. Falls back to the default emotion when the tag is
+    missing or not a known value.
+    """
+    emotion = _DEFAULT_EMOTION
+    match = _EMOTION_TAG_RE.search(reply)
+    if match:
+        candidate = match.group(1).lower()
+        if candidate in _ALLOWED_EMOTIONS:
+            emotion = candidate
+    # Remove every emotion tag (even an unknown one) and tidy whitespace.
+    clean = _EMOTION_TAG_RE.sub("", reply).strip()
+    return clean, emotion
 
 
 def _detect_language(text: str) -> str:
@@ -208,11 +243,13 @@ async def process_message(
             if getattr(block, "type", None) == "text"
         ).strip()
 
+        # Pull the hidden emotion tag out before anything is spoken or stored.
+        reply, emotion = _extract_emotion(reply)
+
         language = _detect_language(reply or user_message)
         # The final reply is always spoken. EXECUTING is only an intermediate
         # state, emitted via on_state while a tool runs (see loop above).
         state = CyberbotState.SPEAKING
-        emotion = "informative"
 
         # Persist the turn for future RAG context.
         await memory.save_message(session_id, "user", user_message)

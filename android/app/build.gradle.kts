@@ -81,6 +81,9 @@ dependencies {
     // JSON
     implementation("com.google.code.gson:gson:2.10.1")
 
+    // 3D avatar (Filament-based glTF/GLB renderer with Compose support)
+    implementation("io.github.sceneview:sceneview:2.2.1")
+
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 

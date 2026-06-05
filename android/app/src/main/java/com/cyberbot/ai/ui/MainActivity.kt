@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
-import android.opengl.GLSurfaceView
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -26,7 +25,7 @@ import com.cyberbot.ai.audio.AudioCaptureManager
 import com.cyberbot.ai.audio.AudioPlaybackManager
 import com.cyberbot.ai.audio.WakeWordDetector
 import com.cyberbot.ai.camera.CameraManager
-import com.cyberbot.ai.hologram.HologramGLRenderer
+import com.cyberbot.ai.hologram.AvatarRenderer
 import com.cyberbot.ai.kiosk.KioskManager
 import com.cyberbot.ai.network.BackendClient
 import com.cyberbot.ai.network.models.CyberbotResponse
@@ -136,24 +135,13 @@ class MainActivity : ComponentActivity() {
         setContent {
             CyberBotTheme {
                 val state by service.state.collectAsState()
+                val emotion by service.emotion.collectAsState()
                 Box(modifier = Modifier.fillMaxSize()) {
-                    // Real OpenGL ES 2.0 hologram (depth-buffered 3D energy orb).
-                    // The renderer is held in the view's tag so state changes can
-                    // be pushed to it from the Compose update block.
-                    AndroidView(
-                        factory = { ctx ->
-                            GLSurfaceView(ctx).apply {
-                                setEGLContextClientVersion(2)
-                                setZOrderOnTop(true) // draw above the window so the orb is visible
-                                val renderer = HologramGLRenderer()
-                                setRenderer(renderer)
-                                renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
-                                tag = renderer
-                            }
-                        },
-                        update = { view ->
-                            (view.tag as? HologramGLRenderer)?.setState(state)
-                        },
+                    // Full-body 3D avatar (SceneView/Filament). Plays a Mixamo
+                    // animation chosen from the current state + backend emotion.
+                    AvatarRenderer(
+                        state = state,
+                        emotion = emotion,
                         modifier = Modifier.fillMaxSize(),
                     )
                     // Tiny, effectively-hidden preview that keeps the camera
@@ -304,6 +292,8 @@ class MainActivity : ComponentActivity() {
             micHandler.postDelayed({ returnToStandby() }, ERROR_RECOVERY_DELAY_MS)
             return
         }
+        // Drive the avatar's speaking animation from the backend emotion.
+        service.setEmotion(response.emotion)
         service.setSpeaking()
 
         // Keep the wake word active during playback so the user can interrupt

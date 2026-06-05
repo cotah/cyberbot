@@ -15,6 +15,14 @@ class CyberbotService {
     private val _state = MutableStateFlow(CyberbotState.STANDBY)
     val state: StateFlow<CyberbotState> = _state.asStateFlow()
 
+    // Last emotion returned by the backend; drives the SPEAKING animation choice.
+    private val _emotion = MutableStateFlow("")
+    val emotion: StateFlow<String> = _emotion.asStateFlow()
+
+    fun setEmotion(emotion: String) {
+        _emotion.value = emotion
+    }
+
     private fun transition(next: CyberbotState) {
         val previous = _state.value
         if (previous != next) {
