@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import android.util.Log
 import androidx.compose.ui.Modifier
 import com.cyberbot.ai.network.models.CyberbotState
 import com.google.android.filament.Skybox
@@ -18,6 +19,9 @@ import io.github.sceneview.rememberEngine
 import io.github.sceneview.rememberModelLoader
 import io.github.sceneview.rememberNodes
 import kotlinx.coroutines.delay
+import kotlin.math.atan
+import kotlin.math.max
+import kotlin.math.sin
 import kotlin.random.Random
 
 /**
@@ -40,12 +44,10 @@ fun AvatarRenderer(
     val engine = rememberEngine()
     val modelLoader = rememberModelLoader(engine)
     val cameraNode = rememberCameraNode(engine) {
-        // Pull the camera back so the whole body is framed, looking at the origin
-        // (identity rotation already looks down -Z, toward the model at 0,0,0).
-        position = Position(x = 0f, y = 0f, z = CAMERA_DISTANCE)
-        // Lens zoom: higher focalLength = narrower FOV = tighter framing.
-        // ~45mm gives roughly a 30 degrees vertical field of view.
+        // Lens zoom (vertical FOV ~= 2*atan(12/focalLength)). Position/clip planes
+        // are computed from the model's measured size once it loads (see below).
         focalLength = CAMERA_FOCAL_LENGTH
+        position = Position(z = 5f) // placeholder; auto-framed after load
     }
     val childNodes = rememberNodes()
 
@@ -53,14 +55,28 @@ fun AvatarRenderer(
     var modelNode by remember { mutableStateOf<ModelNode?>(null) }
     LaunchedEffect(Unit) {
         val instance = modelLoader.loadModelInstance(AVATAR_ASSET) ?: return@LaunchedEffect
-        val node = ModelNode(
-            modelInstance = instance,
-            // No animation plays until we explicitly choose one below.
-            autoAnimate = false,
-            // Normalize size and center the body at the origin for predictable framing.
-            scaleToUnits = MODEL_FIT_UNITS,
-            centerOrigin = Position(0f, 0f, 0f),
+        // Build WITHOUT scaleToUnits: the GLB's rig carries a 0.01 armature scale
+        // that makes scaleToUnits unreliable, so we measure the real size instead.
+        val node = ModelNode(modelInstance = instance, autoAnimate = false)
+
+        // Center the model's bounding box on the origin so the camera can look
+        // straight at its middle.
+        node.centerOrigin(Position(0f, 0f, 0f))
+
+        // Auto-frame: measure the real bounding box and pull the camera back just
+        // far enough that the whole body (plus a margin for animated limbs) fits.
+        val size = node.size
+        val center = node.center
+        val maxDim = max(size.x, max(size.y, size.z))
+        val cameraZ = computeCameraDistance(maxDim)
+        cameraNode.position = Position(x = 0f, y = 0f, z = cameraZ)
+        cameraNode.near = (cameraZ / 100f).coerceIn(0.01f, 1f)
+        cameraNode.far = max(cameraZ * 4f, 100f)
+        Log.i(
+            TAG,
+            "Avatar framed: size=$size center=$center maxDim=$maxDim -> camera z=$cameraZ",
         )
+
         modelNode = node
         childNodes.add(node)
     }
@@ -140,15 +156,33 @@ private val STANDBY_ANIMATIONS = listOf(
 
 fun randomStandbyAnimation(): String = STANDBY_ANIMATIONS.random()
 
+private const val TAG = "AvatarRenderer"
 private const val AVATAR_ASSET = "models/avatar.glb"
 private const val STANDBY_MIN_MS = 30_000L
 private const val STANDBY_MAX_MS = 60_000L
 
-// Camera/model framing (tuned for a 720x1480 portrait screen). The avatar fills
-// roughly the central half of the screen height, full body, centered.
-//   - bigger CAMERA_DISTANCE  -> avatar smaller
-//   - bigger CAMERA_FOCAL_LENGTH -> avatar bigger (tighter lens)
-//   - bigger MODEL_FIT_UNITS -> avatar bigger
-private const val CAMERA_DISTANCE = 20.0f
-private const val CAMERA_FOCAL_LENGTH = 28.0 // ~46 degrees vertical FOV (wider lens)
-private const val MODEL_FIT_UNITS = 1.0f
+// --- Auto-framing (independent of the model's real size) -------------------
+// The camera distance is computed from the measured model size so the whole
+// body always fits, whatever scale the GLB happens to be. Tunables:
+private const val CAMERA_FOCAL_LENGTH = 28.0 // lens; bigger = tighter (zoom in)
+// Portrait kiosk screen aspect (width/height). The horizontal FOV is narrower
+// than the vertical on a tall screen, so it is the binding constraint.
+private const val DEVICE_ASPECT = 720f / 1480f
+// Extra room so arms/legs swung out by an animation never clip. 1.0 = none.
+private const val POSE_SAFETY = 1.35f
+// Breathing room around the avatar. 1.0 = touches the edges; bigger = smaller.
+private const val FRAME_MARGIN = 1.15f
+
+/**
+ * Distance at which a model whose largest dimension is [maxDim] fits inside the
+ * (narrower) horizontal field of view, with margin. Falls back to a sane default
+ * if the bounding box is not available yet.
+ */
+private fun computeCameraDistance(maxDim: Float): Float {
+    if (maxDim <= 0f) return 5f
+    val radius = 0.5f * maxDim * POSE_SAFETY
+    // tan(verticalFov/2) = 12 / focalLength; horizontal is that times the aspect.
+    val tanHalfHorizontal = (12.0 / CAMERA_FOCAL_LENGTH).toFloat() * DEVICE_ASPECT
+    val halfHorizontalFov = atan(tanHalfHorizontal.toDouble())
+    return (radius / sin(halfHorizontalFov)).toFloat() * FRAME_MARGIN
+}
