@@ -109,9 +109,12 @@ class WakeWordDetector(
 
     @SuppressLint("MissingPermission") // RECORD_AUDIO is verified by the caller.
     private fun runRecognitionLoop(loadedModel: Model) {
-        // Grammar mode constrains the recognizer to a small set of words, which
-        // greatly improves wake-word reliability vs free-form recognition.
-        val grammar = """["cyberbot", "cyber bot", "computer", "robot", "hey", "[unk]"]"""
+        // Grammar mode constrains the recognizer to the wake phrase plus "[unk]".
+        // Everything that is NOT "cyber bot" is mapped to [unk] and ignored, so
+        // ordinary speech (and the bot's own voice) can no longer trip the wake
+        // word. Generic fillers like "hey"/"computer"/"robot" were removed
+        // because they fired on any conversation.
+        val grammar = """["cyber bot", "[unk]"]"""
         val recognizer = Recognizer(loadedModel, SAMPLE_RATE_F, grammar)
         val minBuffer = AudioRecord.getMinBufferSize(
             Constants.SAMPLE_RATE,
@@ -254,9 +257,12 @@ class WakeWordDetector(
         private const val SAMPLE_RATE_F = 16000.0f
         private const val CHUNK_SAMPLES = 1024
 
-        // Any of these words (as a substring) triggers the wake action.
+        // Only the full wake phrase triggers activation. Single generic words
+        // ("cyber", "computer", "robot", "hey") were removed: matched as a
+        // substring they fired on ordinary speech, so the bot listened/answered
+        // without a real wake word.
         private val WAKE_WORDS = listOf(
-            "cyberbot", "cyber bot", "cyber", "computer", "robot", "hey",
+            "cyber bot", "cyberbot",
         )
         private const val MODEL_URL =
             "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
