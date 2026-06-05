@@ -78,6 +78,43 @@ def main():
     if base_armature is None:
         raise SystemExit("[merge] no armature imported; aborting")
 
+    # Bake the Mixamo correction into the geometry before export.
+    #
+    # Mixamo FBX import leaves a 90-deg X rotation and a 0.01 scale on the
+    # Armature OBJECT; the meshes are its children and only inherit it. Exported
+    # as-is, that correction becomes a glTF NODE transform on the armature. The
+    # mesh data itself is already upright and full-size, but SceneView/Filament
+    # measures node.size from the mesh data and ignores that node transform, so
+    # the avatar loads lying down (90-deg X) and ~100x too small (0.01).
+    #
+    # Fix it at the source by baking rotation+scale into the rest pose and mesh
+    # data so the GLB ships with identity node transforms:
+    #   1) detach the meshes from the armature but keep their world pose, moving
+    #      the inherited correction onto each mesh object,
+    #   2) apply rotation+scale to the armature rest pose AND the mesh data
+    #      together (same transform on both keeps the skin binding intact),
+    #   3) re-parent the meshes under the armature for a tidy hierarchy.
+    bpy.ops.object.select_all(action="DESELECT")
+    for m in base_meshes:
+        m.select_set(True)
+    bpy.context.view_layer.objects.active = base_meshes[0]
+    bpy.ops.object.parent_clear(type="CLEAR_KEEP_TRANSFORM")
+
+    bpy.ops.object.select_all(action="DESELECT")
+    base_armature.select_set(True)
+    for m in base_meshes:
+        m.select_set(True)
+    bpy.context.view_layer.objects.active = base_armature
+    bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+
+    bpy.ops.object.select_all(action="DESELECT")
+    for m in base_meshes:
+        m.select_set(True)
+    base_armature.select_set(True)
+    bpy.context.view_layer.objects.active = base_armature
+    bpy.ops.object.parent_set(type="OBJECT", keep_transform=True)
+    print("[merge] baked armature rotation+scale into geometry (upright, real scale)")
+
     # Select only the base character for export.
     bpy.ops.object.select_all(action="DESELECT")
     base_armature.select_set(True)
