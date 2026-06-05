@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.opengl.GLSurfaceView
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -25,7 +26,7 @@ import com.cyberbot.ai.audio.AudioCaptureManager
 import com.cyberbot.ai.audio.AudioPlaybackManager
 import com.cyberbot.ai.audio.WakeWordDetector
 import com.cyberbot.ai.camera.CameraManager
-import com.cyberbot.ai.hologram.HologramRenderer
+import com.cyberbot.ai.hologram.HologramGLRenderer
 import com.cyberbot.ai.kiosk.KioskManager
 import com.cyberbot.ai.network.BackendClient
 import com.cyberbot.ai.network.models.CyberbotResponse
@@ -136,7 +137,25 @@ class MainActivity : ComponentActivity() {
             CyberBotTheme {
                 val state by service.state.collectAsState()
                 Box(modifier = Modifier.fillMaxSize()) {
-                    HologramRenderer(state = state, modifier = Modifier.fillMaxSize())
+                    // Real OpenGL ES 2.0 hologram (depth-buffered 3D energy orb).
+                    // The renderer is held in the view's tag so state changes can
+                    // be pushed to it from the Compose update block.
+                    AndroidView(
+                        factory = { ctx ->
+                            GLSurfaceView(ctx).apply {
+                                setEGLContextClientVersion(2)
+                                setZOrderOnTop(true) // draw above the window so the orb is visible
+                                val renderer = HologramGLRenderer()
+                                setRenderer(renderer)
+                                renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+                                tag = renderer
+                            }
+                        },
+                        update = { view ->
+                            (view.tag as? HologramGLRenderer)?.setState(state)
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
                     // Tiny, effectively-hidden preview that keeps the camera
                     // stream active so frames can be captured on demand.
                     AndroidView(
@@ -223,9 +242,9 @@ class MainActivity : ComponentActivity() {
             Log.i(TAG, "Barge-in: interrupting speech to listen")
             audioPlayback.stop() // stop TTS now; onComplete is suppressed
         }
-        // startContinuousConversation stops the wake word + any capture, waits
-        // for the mic, then begins a fresh listening cycle with the 60s timer.
-        startContinuousConversation()
+        // Stop the wake word + any capture, wait for the mic, then begin a fresh
+        // listening cycle. This is the ONLY entry to listening (wake-word-gated).
+        startListeningAfterWakeWord()
     }
 
     private fun startListeningCycle() {
@@ -241,14 +260,18 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Continuous conversation: keep listening for the next question without a
-     * wake word, and arm a 60s inactivity timer that falls back to STANDBY.
+     * Begin a listening cycle AFTER the wake word was heard. Arms a 60s
+     * inactivity timer that falls back to STANDBY if the user stays silent.
      *
      * Stops every mic consumer first and waits [MIC_RELEASE_DELAY_MS] so the
      * microphone is fully released before opening a new capture (avoids the
      * AudioRecord contention that previously broke the second turn).
+     *
+     * This is the only path to [startListeningCycle]; the mic never opens
+     * without the wake word first (startup and post-response both sit in
+     * STANDBY).
      */
-    private fun startContinuousConversation() {
+    private fun startListeningAfterWakeWord() {
         wakeWordDetector.stop()
         audioCapture.stopCapture()
         micHandler.postDelayed({
@@ -292,9 +315,10 @@ class MainActivity : ComponentActivity() {
         }
 
         // Audio arrives as a stream of PCM chunks (onTtsChunk). Start streaming
-        // playback now; when it finishes, stay in continuous conversation.
+        // playback now; when it finishes, return to STANDBY and require the wake
+        // word again for the next turn (no listening without "hey cyberbot").
         audioPlayback.startStream {
-            runOnUiThread { startContinuousConversation() }
+            runOnUiThread { returnToStandby() }
         }
     }
 
