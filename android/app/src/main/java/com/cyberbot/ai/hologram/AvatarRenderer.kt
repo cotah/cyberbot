@@ -40,8 +40,12 @@ fun AvatarRenderer(
     val engine = rememberEngine()
     val modelLoader = rememberModelLoader(engine)
     val cameraNode = rememberCameraNode(engine) {
-        // Pull the camera back so the whole body is framed, looking at the origin.
-        position = Position(z = 4.0f)
+        // Pull the camera back so the whole body is framed, looking at the origin
+        // (identity rotation already looks down -Z, toward the model at 0,0,0).
+        position = Position(x = 0f, y = 0f, z = CAMERA_DISTANCE)
+        // Lens zoom: higher focalLength = narrower FOV = tighter framing.
+        // ~45mm gives roughly a 30 degrees vertical field of view.
+        focalLength = CAMERA_FOCAL_LENGTH
     }
     val childNodes = rememberNodes()
 
@@ -54,7 +58,7 @@ fun AvatarRenderer(
             // No animation plays until we explicitly choose one below.
             autoAnimate = false,
             // Normalize size and center the body at the origin for predictable framing.
-            scaleToUnits = 2.0f,
+            scaleToUnits = MODEL_FIT_UNITS,
             centerOrigin = Position(0f, 0f, 0f),
         )
         modelNode = node
@@ -87,6 +91,10 @@ fun AvatarRenderer(
         modelLoader = modelLoader,
         cameraNode = cameraNode,
         childNodes = childNodes,
+        // No orbit manipulator: the camera stays exactly where we put it (kiosk).
+        // Without this, SceneView's default manipulator overrides cameraNode and
+        // parks the camera ~1 unit away, putting it inside the model.
+        cameraManipulator = null,
         // Absolute black background (lambda receiver is the SceneView).
         onViewCreated = {
             skybox = Skybox.Builder().color(0f, 0f, 0f, 1f).build(engine)
@@ -135,3 +143,12 @@ fun randomStandbyAnimation(): String = STANDBY_ANIMATIONS.random()
 private const val AVATAR_ASSET = "models/avatar.glb"
 private const val STANDBY_MIN_MS = 30_000L
 private const val STANDBY_MAX_MS = 60_000L
+
+// Camera/model framing (tuned for a 720x1480 portrait screen). The avatar fills
+// roughly the central half of the screen height, full body, centered.
+//   - bigger CAMERA_DISTANCE  -> avatar smaller
+//   - bigger CAMERA_FOCAL_LENGTH -> avatar bigger (tighter lens)
+//   - bigger MODEL_FIT_UNITS -> avatar bigger
+private const val CAMERA_DISTANCE = 8.0f
+private const val CAMERA_FOCAL_LENGTH = 45.0 // ~30 degrees vertical FOV
+private const val MODEL_FIT_UNITS = 2.0f
