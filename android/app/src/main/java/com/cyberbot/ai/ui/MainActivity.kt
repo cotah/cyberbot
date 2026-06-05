@@ -25,7 +25,7 @@ import com.cyberbot.ai.audio.AudioCaptureManager
 import com.cyberbot.ai.audio.AudioPlaybackManager
 import com.cyberbot.ai.audio.WakeWordDetector
 import com.cyberbot.ai.camera.CameraManager
-import com.cyberbot.ai.hologram.AvatarRenderer
+import com.cyberbot.ai.hologram.HologramRenderer
 import com.cyberbot.ai.kiosk.KioskManager
 import com.cyberbot.ai.network.BackendClient
 import com.cyberbot.ai.network.models.CyberbotResponse
@@ -135,13 +135,11 @@ class MainActivity : ComponentActivity() {
         setContent {
             CyberBotTheme {
                 val state by service.state.collectAsState()
-                val emotion by service.emotion.collectAsState()
                 Box(modifier = Modifier.fillMaxSize()) {
-                    // Full-body 3D avatar (SceneView/Filament). Plays a Mixamo
-                    // animation chosen from the current state + backend emotion.
-                    AvatarRenderer(
+                    // JARVIS-style energy orb (real OpenGL ES 2.0). Colour, rotation
+                    // speed and effect are driven by the current state.
+                    HologramRenderer(
                         state = state,
-                        emotion = emotion,
                         modifier = Modifier.fillMaxSize(),
                     )
                     // Tiny, effectively-hidden preview that keeps the camera
