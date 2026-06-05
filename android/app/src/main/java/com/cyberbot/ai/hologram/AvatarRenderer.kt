@@ -149,6 +149,6 @@ private const val STANDBY_MAX_MS = 60_000L
 //   - bigger CAMERA_DISTANCE  -> avatar smaller
 //   - bigger CAMERA_FOCAL_LENGTH -> avatar bigger (tighter lens)
 //   - bigger MODEL_FIT_UNITS -> avatar bigger
-private const val CAMERA_DISTANCE = 8.0f
-private const val CAMERA_FOCAL_LENGTH = 45.0 // ~30 degrees vertical FOV
-private const val MODEL_FIT_UNITS = 2.0f
+private const val CAMERA_DISTANCE = 20.0f
+private const val CAMERA_FOCAL_LENGTH = 28.0 // ~46 degrees vertical FOV (wider lens)
+private const val MODEL_FIT_UNITS = 1.0f
