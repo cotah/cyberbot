@@ -13,6 +13,7 @@ import com.cyberbot.ai.network.models.CyberbotState
 import com.google.android.filament.Skybox
 import io.github.sceneview.Scene
 import io.github.sceneview.math.Position
+import io.github.sceneview.math.Scale
 import io.github.sceneview.node.ModelNode
 import io.github.sceneview.rememberCameraNode
 import io.github.sceneview.rememberEngine
@@ -55,26 +56,31 @@ fun AvatarRenderer(
     var modelNode by remember { mutableStateOf<ModelNode?>(null) }
     LaunchedEffect(Unit) {
         val instance = modelLoader.loadModelInstance(AVATAR_ASSET) ?: return@LaunchedEffect
-        // Build WITHOUT scaleToUnits: the GLB's rig carries a 0.01 armature scale
-        // that makes scaleToUnits unreliable, so we measure the real size instead.
         val node = ModelNode(modelInstance = instance, autoAnimate = false)
 
-        // Center the model's bounding box on the origin so the camera can look
-        // straight at its middle.
-        node.centerOrigin(Position(0f, 0f, 0f))
+        // The GLB rig carries Blender's 0.01 armature scale, so the model loads
+        // ~100x too small (measured ~0.018 units). Scale it back to a sane size
+        // and re-center accounting for that scale (the measured center is in the
+        // unscaled model space, so multiply it by the same factor).
+        val rawSize = node.size
+        val rawCenter = node.center
+        node.scale = Scale(MODEL_SCALE_FIX, MODEL_SCALE_FIX, MODEL_SCALE_FIX)
+        node.position = Position(
+            x = -rawCenter.x * MODEL_SCALE_FIX,
+            y = -rawCenter.y * MODEL_SCALE_FIX,
+            z = -rawCenter.z * MODEL_SCALE_FIX,
+        )
 
-        // Auto-frame: measure the real bounding box and pull the camera back just
-        // far enough that the whole body (plus a margin for animated limbs) fits.
-        val size = node.size
-        val center = node.center
-        val maxDim = max(size.x, max(size.y, size.z))
-        val cameraZ = computeCameraDistance(maxDim)
+        // Auto-frame using the corrected (rendered) size so the whole body fits.
+        val correctedMaxDim = max(rawSize.x, max(rawSize.y, rawSize.z)) * MODEL_SCALE_FIX
+        val cameraZ = computeCameraDistance(correctedMaxDim)
         cameraNode.position = Position(x = 0f, y = 0f, z = cameraZ)
         cameraNode.near = (cameraZ / 100f).coerceIn(0.01f, 1f)
         cameraNode.far = max(cameraZ * 4f, 100f)
         Log.i(
             TAG,
-            "Avatar framed: size=$size center=$center maxDim=$maxDim -> camera z=$cameraZ",
+            "Avatar framed: rawSize=$rawSize scaled x$MODEL_SCALE_FIX -> " +
+                "maxDim=$correctedMaxDim camera z=$cameraZ",
         )
 
         modelNode = node
@@ -165,6 +171,8 @@ private const val STANDBY_MAX_MS = 60_000L
 // The camera distance is computed from the measured model size so the whole
 // body always fits, whatever scale the GLB happens to be. Tunables:
 private const val CAMERA_FOCAL_LENGTH = 28.0 // lens; bigger = tighter (zoom in)
+// Undo Blender's 0.01 armature export scale (model loads ~100x too small).
+private const val MODEL_SCALE_FIX = 100f
 // Portrait kiosk screen aspect (width/height). The horizontal FOV is narrower
 // than the vertical on a tall screen, so it is the binding constraint.
 private const val DEVICE_ASPECT = 720f / 1480f
